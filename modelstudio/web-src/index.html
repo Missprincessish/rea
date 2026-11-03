@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ModelStudio</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark"></span>
+          <span class="brand-name">MODEL<span>STUDIO</span></span>
+          <span class="brand-tag" id="project-label">no project</span>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn ghost" id="btn-new-project" title="New project">New</button>
+          <div class="project-picker">
+            <select id="project-select" title="Open project"></select>
+          </div>
+          <span class="divider"></span>
+          <button class="btn ghost icon" id="btn-undo" title="Undo (Cmd+Z)">&#8630;</button>
+          <button class="btn ghost icon" id="btn-redo" title="Redo (Shift+Cmd+Z)">&#8631;</button>
+          <span class="divider"></span>
+          <button class="btn" id="btn-import" title="Import GLB / glTF">Import</button>
+          <button class="btn accent" id="btn-export" title="Export GLB">Export GLB</button>
+          <span class="divider"></span>
+          <button class="btn accent" id="btn-open-vr" title="Enter live WebXR VR World (Meta Quest 3S / WebXR / Desktop)">VR World</button>
+        </div>
+      </header>
+
+      <aside class="sidebar left">
+        <nav class="tabs" id="tool-tabs">
+          <button class="tab active" data-panel="generate">Generate</button>
+          <button class="tab" data-panel="objects">Scene</button>
+          <button class="tab" data-panel="edit">Edit</button>
+          <button class="tab" data-panel="rig">Rig</button>
+        </nav>
+
+        <section class="panel active" data-panel="generate">
+          <h2 class="panel-title">Text to 3D</h2>
+          <textarea id="prompt-input" rows="3" placeholder="realistic wooden chair, tall female character, crystal gem..."></textarea>
+          <div class="row">
+            <label class="field">
+              <span>Detail</span>
+              <input type="range" id="gen-resolution" min="48" max="160" step="8" value="96" />
+              <output id="gen-resolution-out">96</output>
+            </label>
+          </div>
+          <div class="row">
+            <label class="toggle"><input type="checkbox" id="gen-split" /> split into parts</label>
+          </div>
+          <h2 class="panel-title">Quality preset</h2>
+          <div class="segmented" id="gen-quality-presets">
+            <button data-quality="draft" title="Fast preview: 64 detail">Draft</button>
+            <button data-quality="standard" class="active" title="Balanced: 96 detail">Standard</button>
+            <button data-quality="ultra" title="High detail: 144 + repair">Ultra</button>
+          </div>
+          <p class="hint" id="gen-quality-note">Standard: 96 detail, auto UV + texture bake. Switch to Ultra for print/VR scale.</p>
+          <button class="btn accent wide" id="btn-generate">Generate mesh</button>
+          <p class="hint" id="generation-note">
+            Runs the local structured-prompt generator: no credits, no network. Output is real editable geometry.
+          </p>
+
+          <h2 class="panel-title">Prompt library <small id="archetype-count"></small></h2>
+          <input type="text" id="archetype-search" placeholder="Search 52 archetypes: barrel, couch, pine tree..." />
+          <div class="chip-grid" id="archetype-chips"></div>
+
+          <h2 class="panel-title">Image to 3D</h2>
+          <div class="dropzone" id="image-dropzone">
+            <input type="file" id="image-input" accept="image/*" multiple hidden />
+            <p>Drop reference images</p>
+            <small>front view first &middot; <code>front.png</code>, <code>side.png</code>, <code>back.png</code></small>
+          </div>
+          <ul class="thumbs" id="image-thumbs"></ul>
+          <button class="btn wide" id="btn-generate-image" disabled>Reconstruct from images</button>
+          <p class="hint">
+            Visual-hull carving from your silhouettes. One image gives an extrusion; add side/back views for volume.
+          </p>
+
+          <h2 class="panel-title">Providers</h2>
+          <div id="provider-list" class="provider-list"></div>
+        </section>
+
+        <section class="panel" data-panel="objects">
+          <h2 class="panel-title">Scene</h2>
+          <ul class="object-list" id="object-list"></ul>
+          <div class="row split">
+            <button class="btn ghost" id="btn-focus">Frame</button>
+            <button class="btn ghost" id="btn-duplicate">Duplicate</button>
+            <button class="btn ghost danger" id="btn-delete">Delete</button>
+          </div>
+          <h2 class="panel-title">Materials</h2>
+          <div id="material-list" class="material-list"></div>
+          <div id="material-editor" class="stack hidden">
+            <label class="field"><span>Base colour</span><input type="color" id="mat-color" /></label>
+            <label class="field"><span>Metallic</span><input type="range" id="mat-metallic" min="0" max="1" step="0.01" /></label>
+            <label class="field"><span>Roughness</span><input type="range" id="mat-roughness" min="0" max="1" step="0.01" /></label>
+            <label class="field"><span>Preset</span><select id="mat-preset"></select></label>
+            <div class="row split">
+              <button class="btn ghost" id="btn-apply-material">Apply</button>
+              <button class="btn ghost" id="btn-bake-material">Bake maps</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" data-panel="edit">
+          <h2 class="panel-title">Mesh operations</h2>
+          <div class="grid-2">
+            <button class="btn ghost" data-op="mesh.repair">Repair</button>
+            <button class="btn ghost" data-op="mesh.uv">UV map</button>
+            <button class="btn ghost" data-op="remesh">Remesh</button>
+            <button class="btn ghost" data-op="decimate">Decimate</button>
+            <button class="btn ghost" data-op="mesh.smooth">Smooth</button>
+            <button class="btn ghost" data-op="mesh.flip-normals">Flip normals</button>
+          </div>
+          <label class="field"><span>Decimate target</span><input type="number" id="decimate-target" value="30000" min="100" step="1000" /></label>
+          <label class="field"><span>Remesh res</span><input type="range" id="remesh-resolution" min="32" max="176" step="8" value="96" /><output id="remesh-resolution-out">96</output></label>
+
+          <h2 class="panel-title">Sculpt</h2>
+          <div class="segmented" id="sculpt-modes">
+            <button data-sculpt="inflate" class="active">Inflate</button>
+            <button data-sculpt="grab">Grab</button>
+            <button data-sculpt="pinch">Pinch</button>
+            <button data-sculpt="flatten">Flatten</button>
+            <button data-sculpt="smooth">Smooth</button>
+          </div>
+          <label class="field"><span>Brush size</span><input type="range" id="brush-size" min="0.01" max="0.6" step="0.01" value="0.14" /></label>
+          <label class="field"><span>Strength</span><input type="range" id="brush-strength" min="0.002" max="0.12" step="0.002" value="0.03" /></label>
+          <p class="hint">Drag on the model to sculpt. Each stroke is one undoable command.</p>
+
+          <h2 class="panel-title">Texture paint</h2>
+          <div class="row">
+            <input type="color" id="paint-color" value="#ff5c8a" />
+            <label class="field inline"><span>Size</span><input type="range" id="paint-size" min="0.01" max="0.3" step="0.01" value="0.06" /></label>
+          </div>
+          <button class="btn ghost wide" id="btn-paint-toggle">Enter paint mode</button>
+          <button class="btn ghost wide" id="btn-paint-fit">Bake 2048 base colour for selection</button>
+        </section>
+
+        <section class="panel" data-panel="rig">
+          <h2 class="panel-title">Automatic rigging</h2>
+          <button class="btn accent wide" id="btn-rig">Rig selection</button>
+          <p class="hint">Builds a proportional skeleton, binds smooth weights and stores them in the project.</p>
+          <h2 class="panel-title">Skin weights</h2>
+          <div class="row split">
+            <button class="btn ghost" id="btn-correct-weights">Correct</button>
+            <button class="btn ghost" id="btn-symmetrise-weights">Symmetrise</button>
+          </div>
+          <h2 class="panel-title">Animation</h2>
+          <label class="field"><span>Clip</span><select id="clip-select"></select></label>
+          <div class="row split">
+            <button class="btn ghost" id="btn-add-clip">Add clip</button>
+            <button class="btn ghost" id="btn-preview-clip">Play</button>
+          </div>
+          <label class="field"><span>Bone</span><select id="bone-select"></select></label>
+          <div class="row triple">
+            <label class="mini">X<input type="number" id="bone-rx" value="0" step="5" /></label>
+            <label class="mini">Y<input type="number" id="bone-ry" value="0" step="5" /></label>
+            <label class="mini">Z<input type="number" id="bone-rz" value="0" step="5" /></label>
+          </div>
+          <button class="btn ghost wide" id="btn-apply-pose">Apply bone rotation</button>
+          <h2 class="panel-title">Workflows</h2>
+          <select id="workflow-select"></select>
+          <button class="btn wide" id="btn-run-workflow">Run workflow</button>
+        </section>
+      </aside>
+
+      <main class="stage">
+        <div id="viewport" class="viewport"></div>
+        <div class="overlay-top">
+          <div class="mode-bar" id="mode-bar">
+            <button class="mode active" data-mode="select">Select</button>
+            <button class="mode" data-mode="transform">Move</button>
+            <button class="mode" data-mode="sculpt">Sculpt</button>
+            <button class="mode" data-mode="paint">Paint</button>
+          </div>
+          <div class="gizmo-bar" id="gizmo-bar">
+            <button class="mode active" data-gizmo="translate">T</button>
+            <button class="mode" data-gizmo="rotate">R</button>
+            <button class="mode" data-gizmo="scale">S</button>
+          </div>
+        </div>
+        <div class="overlay-bottom">
+          <div class="stats" id="scene-stats">&mdash;</div>
+          <div class="view-buttons">
+            <button class="btn ghost" id="btn-frame-all">Frame all</button>
+            <button class="btn ghost" id="btn-snapshot">Screenshot</button>
+          </div>
+        </div>
+        <div id="toast-stack" class="toast-stack"></div>
+        <div id="busy" class="busy hidden"><span class="spinner"></span><span id="busy-label">working...</span></div>
+      </main>
+
+      <aside class="sidebar right">
+        <div class="panel-header">
+          <h2>Inspector</h2>
+          <span class="badge" id="revision-badge">rev 0</span>
+        </div>
+        <div id="inspector" class="inspector">
+          <p class="hint">Select an object to see its stats.</p>
+        </div>
+        <div class="panel-header"><h2>Activity</h2></div>
+        <ul id="activity-log" class="activity"></ul>
+      </aside>
+    </div>
+    <input type="file" id="import-input" accept=".glb,.gltf" hidden />
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

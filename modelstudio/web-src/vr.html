@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>ModelStudio VR World — Live Spatial AI &amp; Open MCP</title>
+    <link rel="stylesheet" href="./vr.css" />
+  </head>
+  <body>
+    <div id="vr-stage"></div>
+
+    <!-- Top status & navigation bar -->
+    <header class="vr-topbar">
+      <div class="vr-brand">
+        <a href="/" class="vr-back" id="link-studio" title="Back to Studio Modeling View">&larr; Studio</a>
+        <span class="vr-dot"></span>
+        <strong>MODEL<span>STUDIO</span> VR</strong>
+        <select id="vr-project-select" title="Active world project"></select>
+        <span class="vr-badge" id="vr-biome-badge">studio</span>
+      </div>
+
+      <div class="vr-top-actions">
+        <span class="vr-coord-pill" id="vr-pointer-pill" title="Click ground (or pull VR trigger) to pin 'Right There'">
+          📍 <code id="vr-coord-text">0.0, 0.0, -2.5</code>
+        </span>
+        <span class="vr-target-pill hidden" id="vr-target-pill">
+          🎯 <code id="vr-target-text">none</code>
+        </span>
+        <button class="vr-btn" id="btn-undo-top" title="Undo (Ctrl/Cmd+Z)">↩️ Undo</button>
+        <button class="vr-btn" id="btn-redo-top" title="Redo (Ctrl/Cmd+Y)">↪️ Redo</button>
+        <button class="vr-btn" id="btn-recenter" title="Return to the world spawn point (R)">🎯 Recenter</button>
+        <button class="vr-btn" id="btn-locomotion-drawer" title="VR Movement, Turning, Snapping &amp; Grid Settings">⚙️ Controls</button>
+        <button class="vr-btn" id="btn-ai-drawer" title="Configure ChatGPT / OpenAI / Local LLM &amp; Open MCP">AI &amp; MCP</button>
+        <button class="vr-btn vr-enter" id="btn-enter-vr">Enter VR (Quest / WebXR)</button>
+        <button class="vr-btn vr-ar hidden" id="btn-enter-ar" title="Meta Quest 3S Color Passthrough">Passthrough AR</button>
+      </div>
+    </header>
+
+    <!-- Secure-context / Quest Wi-Fi helper banner -->
+    <div class="vr-banner hidden" id="vr-https-warning">
+      <strong>Meta Quest Wi-Fi note:</strong> WebXR &amp; voice mic require HTTPS on LAN IPs. Run
+      <code>npm run start:vr</code> on your MacBook and open the <code>https://</code> URL on your Quest 3S.
+    </div>
+
+    <!-- Placement Ghost Preview Banner (shown when previewing an object before confirming) -->
+    <div class="vr-preview-banner hidden" id="vr-preview-banner">
+      <span id="vr-preview-label">👻 Previewing: wooden fence</span>
+      <button type="button" class="vr-btn" id="btn-preview-rot-left" title="Rotate -45° (Q)">↺ -45°</button>
+      <button type="button" class="vr-btn" id="btn-preview-rot-right" title="Rotate +45° (E / R)">↻ +45°</button>
+      <button type="button" class="vr-btn" id="btn-preview-rot-90" title="Rotate 90°">↻ 90°</button>
+      <button type="button" class="vr-btn vr-enter" id="btn-preview-confirm" title="Click ground or pull VR Trigger to confirm">✓ Place Here</button>
+      <button type="button" class="vr-btn vr-danger" id="btn-preview-cancel" title="Cancel preview (Esc)">✕ Cancel</button>
+    </div>
+
+    <!-- Selected Object Inspector & Direct Manipulation Toolbar (Phase 3) -->
+    <section class="vr-inspector hidden" id="vr-object-inspector">
+      <div class="vr-inspector-title">
+        <span>✏️ Selected: <strong id="sel-obj-name">none</strong></span>
+        <span class="vr-snap-tag hidden" id="sel-snap-badge">🧲 Snapped</span>
+        <button type="button" class="vr-mini-close" id="btn-deselect" title="Deselect (Esc)">&times;</button>
+      </div>
+      <div class="vr-inspector-buttons">
+        <button type="button" data-edit="drag-toggle" id="btn-drag-move" title="Drag object across ground (or hold Grip in VR)">✋ Grab / Move</button>
+        <button type="button" data-edit="move-pin" title="Move selected object to pinned spot">📍 Move to Pin</button>
+        <button type="button" data-edit="rot-left" title="Rotate -45°">↺ -45°</button>
+        <button type="button" data-edit="rot-right" title="Rotate +45° (R)">↻ +45°</button>
+        <button type="button" data-edit="rot-90" title="Rotate +90°">↻ 90°</button>
+        <button type="button" data-edit="scale-down" title="Resize smaller ([)">➖ Smaller</button>
+        <button type="button" data-edit="scale-up" title="Resize bigger (])">➕ Bigger</button>
+        <button type="button" data-edit="snap" title="Snap fence end-to-end or align to nearest structure (F)">🧲 Snap / Align</button>
+        <button type="button" data-edit="duplicate" title="Duplicate (extends fences end-to-end automatically!) (D)">📋 Duplicate</button>
+        <button type="button" data-edit="delete" class="danger" title="Delete selected object (Del)">🗑️ Delete</button>
+      </div>
+    </section>
+
+    <!-- Build Palette + Quick Spatial Chips -->
+    <div class="vr-quick-chips" id="vr-quick-chips">
+      <button type="button" data-place="wooden fence">🪵 Place Fence</button>
+      <button type="button" data-place="green barn">🏠 Place Green Barn</button>
+      <button type="button" data-place="windmill">🗼 Place Windmill</button>
+      <button type="button" data-place="grain silo">🏗️ Place Silo</button>
+      <button type="button" data-place="golden haybale">🌾 Place Hay Bale</button>
+      <button type="button" data-say="make this a hayfield">🌾 Hayfield Biome</button>
+      <button type="button" data-say="make this a pine forest at sunset">🌲 Sunset Forest</button>
+      <button type="button" data-say="make this a starlit clearing with fireflies">✨ Night Fireflies</button>
+    </div>
+
+    <!-- AI Reply / Transcript toast -->
+    <div class="vr-reply hidden" id="vr-reply-box">
+      <div class="vr-reply-label" id="vr-reply-mode">AI World Builder</div>
+      <div class="vr-reply-text" id="vr-reply-text"></div>
+    </div>
+
+    <!-- Bottom Spatial Voice + Text Command Bar -->
+    <form class="vr-command-bar" id="vr-command-form" autocomplete="off">
+      <button type="button" class="vr-mic-btn" id="btn-voice" title="Speak command while pointing (locks current pointer spot)">
+        <span class="mic-icon">🎤</span>
+        <span id="voice-label">Speak</span>
+      </button>
+      <input
+        type="text"
+        id="vr-prompt-input"
+        placeholder='Point or select an object &amp; say: "move that fence closer", "rotate this windmill", or "put a green barn right there"'
+      />
+      <button type="submit" class="vr-send-btn" id="btn-send-prompt">Run</button>
+    </form>
+
+    <!-- Controls legend -->
+    <div class="vr-help-hint">
+      <span><strong>Desktop:</strong> Click object = select &middot; Click ground = pin/place &middot; Drag = look &middot; WASD = walk &middot; R/[ / ]/D/F/Del = edit</span>
+      <span><strong>Quest 3S:</strong> L-Stick = walk/strafe &middot; R-Stick = smooth turn &middot; Trigger = select/place &middot; Hold Grip on object = move + R-Stick rotate/resize &middot; B/Y or ☰ = menu &middot; A/X = voice</span>
+    </div>
+
+    <!-- VR Movement, Snapping & Placement Settings Drawer (Phase 1 & 3) -->
+    <aside class="vr-drawer vr-drawer-left hidden" id="locomotion-drawer">
+      <div class="vr-drawer-head">
+        <h2>VR Controls &amp; Snapping</h2>
+        <button class="vr-close" id="btn-close-locomotion">&times;</button>
+      </div>
+
+      <label class="vr-field">
+        <span>Walk Speed (<output id="out-move-speed">4.5</output> m/s)</span>
+        <input type="range" id="rng-move-speed" min="1.5" max="9.0" step="0.5" value="4.5" />
+      </label>
+
+      <label class="vr-field">
+        <span>Right Stick Turning Mode</span>
+        <select id="sel-turn-mode">
+          <option value="smooth">Smooth Turning (fluid)</option>
+          <option value="snap">Snap Turning (comfort steps)</option>
+        </select>
+      </label>
+
+      <label class="vr-field">
+        <span>Smooth Turn Speed (<output id="out-turn-speed">95</output>°/s)</span>
+        <input type="range" id="rng-turn-speed" min="40" max="180" step="5" value="95" />
+      </label>
+
+      <label class="vr-field">
+        <span>Snap Turn Step</span>
+        <select id="sel-snap-angle">
+          <option value="30">30°</option>
+          <option value="45">45°</option>
+        </select>
+      </label>
+
+      <div class="vr-toggle-list">
+        <label class="vr-check"><input type="checkbox" id="chk-teleport" /> Optional Right-Stick-Forward Teleport Arc</label>
+        <label class="vr-check"><input type="checkbox" id="chk-snap" checked /> Magnetic Fence End-to-End &amp; Structure Alignment</label>
+        <label class="vr-check"><input type="checkbox" id="chk-preview" checked /> Preview 3D Ghost Before Placing Objects</label>
+      </div>
+
+      <label class="vr-field" style="margin-top:10px">
+        <span>Grid Snapping</span>
+        <select id="sel-grid-snap">
+          <option value="0">Off (free + magnetic fence/structure snap)</option>
+          <option value="0.5">0.5 m Grid + 15° Angle Snap</option>
+          <option value="1">1.0 m Grid + 15° Angle Snap</option>
+        </select>
+      </label>
+    </aside>
+
+    <!-- Open MCP & AI Provider Drawer -->
+    <aside class="vr-drawer hidden" id="ai-drawer">
+      <div class="vr-drawer-head">
+        <h2>AI Provider &amp; Open MCP</h2>
+        <button class="vr-close" id="btn-close-drawer">&times;</button>
+      </div>
+
+      <p class="vr-drawer-note">
+        ModelStudio is open to <strong>any AI</strong>. Use the built-in offline spatial planner, connect ChatGPT / Ollama / OpenRouter, or attach any MCP client live while you are in VR.
+      </p>
+
+      <label class="vr-field">
+        <span>In-World Voice/Text Engine</span>
+        <select id="ai-provider-select">
+          <option value="auto">Auto (OpenAI-compatible if configured, else Offline Spatial Planner)</option>
+          <option value="local">Built-in Offline Spatial Planner (no key needed)</option>
+          <option value="openai">OpenAI-compatible LLM (ChatGPT, Ollama, LM Studio, OpenRouter…)</option>
+        </select>
+      </label>
+
+      <label class="vr-field">
+        <span>Base URL (OpenAI-compatible)</span>
+        <input type="text" id="ai-base-url" placeholder="https://api.openai.com/v1 or http://localhost:11434/v1" />
+      </label>
+
+      <label class="vr-field">
+        <span>Model</span>
+        <input type="text" id="ai-model" placeholder="gpt-4o-mini / gpt-4.1 / llama3.2" />
+      </label>
+
+      <label class="vr-field">
+        <span>API Key (held in server memory only, optional for Ollama)</span>
+        <input type="password" id="ai-api-key" placeholder="sk-..." />
+      </label>
+
+      <div class="vr-row">
+        <button type="button" class="vr-btn vr-enter" id="btn-save-ai">Save AI Settings</button>
+        <label class="vr-check"><input type="checkbox" id="chk-tts" checked /> Speak AI replies aloud</label>
+      </div>
+
+      <hr />
+      <h3>Open MCP Endpoints (Claude, ChatGPT, Cursor, Custom Agents)</h3>
+      <label class="vr-field">
+        <span>Streamable HTTP MCP URL</span>
+        <input type="text" id="mcp-http-url" readonly />
+      </label>
+      <label class="vr-field">
+        <span>Stdio MCP Config (<code>mcp.json</code>)</span>
+        <textarea id="mcp-stdio-json" rows="6" readonly></textarea>
+      </label>
+      <label class="vr-field">
+        <span>Meta Quest 3S LAN Addresses</span>
+        <input type="text" id="quest-lan-urls" readonly />
+      </label>
+    </aside>
+
+    <script type="module" src="./vr-main.js"></script>
+  </body>
+</html>
