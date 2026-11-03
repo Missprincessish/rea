@@ -175,6 +175,14 @@ All of the input math lives in [`src/core/vr-interaction.mjs`](src/core/vr-inter
 covered by `tests/vr-controls-edit.test.mjs`, so controller behaviour is regression-tested without
 a headset.
 
+## Standalone repository
+
+The same tree is also mirrored as a self-contained repo at
+`/home/user/modelstudio` (`main` + `feat/vr-controls-and-live-editing`), ready to
+publish to `Missprincessish/modelstudio`. Repository creation is currently
+blocked by the GitHub installation token — the exact API error and a one-line
+publish command are recorded in that repo's `PUBLISH.md`.
+
 ## Repository layout
 
 ```
