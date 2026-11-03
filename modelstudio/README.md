@@ -205,6 +205,7 @@ examples/automation/       external automation example
 
 ## Documentation
 
+* [docs/VR_CONTROLS_QUICKSTART.md](docs/VR_CONTROLS_QUICKSTART.md) — one-command start + the full Quest 3S control map
 * [docs/VR_AND_MCP.md](docs/VR_AND_MCP.md) — Meta Quest 3S / WebXR VR setup, `"right there"` spatial voice commands, ChatGPT & Open MCP
 * [docs/INSTALL.md](docs/INSTALL.md) — install, workspace paths, remote terminal
 * [docs/FEATURES.md](docs/FEATURES.md) — every verified capability + the test
