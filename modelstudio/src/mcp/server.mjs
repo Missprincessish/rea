@@ -253,6 +253,50 @@ export function createMcpServer({ onMutate = null } = {}) {
   );
 
   server.registerTool(
+    'modelstudio_world_snap',
+    {
+      title: 'Snap fences end-to-end or align object to nearby structure',
+      description:
+        'Snap a fence end-to-end onto the nearest existing fence post, magnetically align an object to nearby buildings, or snap to a world grid.',
+      inputSchema: {
+        project: z.string(),
+        object: z.string().optional().describe('"targeted" (default) or object id/name'),
+        mode: z.enum(['auto', 'fence', 'align', 'grid']).optional(),
+        gridSnap: z.number().optional(),
+      },
+    },
+    async ({ project, object = 'targeted', mode = 'auto', gridSnap = 0 }) => {
+      const result = await execute('world.snap', { project, object, mode, gridSnap });
+      return {
+        isError: !result.ok,
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  server.registerTool(
+    'modelstudio_world_duplicate',
+    {
+      title: 'Duplicate a world object (extends fences end-to-end automatically)',
+      description:
+        'Duplicate an object grounded on the terrain; for fences, automatically places the duplicate snapped end-to-end onto an open post.',
+      inputSchema: {
+        project: z.string(),
+        object: z.string().optional().describe('"targeted" (default) or object id/name'),
+        snapEndToEnd: z.boolean().optional(),
+        cornerDeg: z.number().optional().describe('0 for inline fence extension, 90 or -90 for a corner joint'),
+      },
+    },
+    async ({ project, object = 'targeted', snapEndToEnd = true, cornerDeg = 0 }) => {
+      const result = await execute('world.duplicate', { project, object, snapEndToEnd, cornerDeg });
+      return {
+        isError: !result.ok,
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  server.registerTool(
     'modelstudio_preview',
     {
       title: 'Render a project preview',

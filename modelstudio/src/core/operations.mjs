@@ -32,6 +32,14 @@ import {
   resolveSpatialLocation,
   updateVrState,
 } from './vr-state.mjs';
+import {
+  computeFenceSnap,
+  computeObjectFootprint,
+  computeStructureAlignment,
+  fenceEndpoints,
+  localAxesFromYaw,
+  solveSmartPlacement,
+} from './vr-interaction.mjs';
 import { executeWorldPrompt } from './world-agent.mjs';
 import {
   boundingBox,
@@ -51,6 +59,7 @@ import {
   bakeAO,
   bakeBaseColor,
   bakeNormal,
+  bakeAOField,
   ambientOcclusion,
   decodeImage,
   encodePng,
@@ -1116,6 +1125,7 @@ command({
     mode: z.enum(['albedo', 'ao', 'normal', 'all']).default('all'),
     pattern: z.enum(['none', 'wood', 'stone', 'metal', 'fabric', 'skin', 'crystal']).default('none'),
     aoSamples: number().default(12),
+    perTexel: bool().default(false),
   },
   input: schema({
     project: z.string(),
@@ -1124,6 +1134,7 @@ command({
     mode: z.enum(['albedo', 'ao', 'normal', 'all']).default('all'),
     pattern: z.enum(['none', 'wood', 'stone', 'metal', 'fabric', 'skin', 'crystal']).default('none'),
     aoSamples: z.coerce.number().int().min(1).max(64).default(12),
+    perTexel: z.coerce.boolean().default(false),
   }),
   examples: ['modelstudio bake --project Demo --object Chair --size 1024 --pattern wood'],
   handler: async (input) => withProject(input.project, async (project) => {
@@ -1138,20 +1149,24 @@ command({
     const needsUv = uvCoverage(geo) < 0.001;
     const working = needsUv ? projectUV(geo, { projection: 'auto' }) : geo;
     const started = Date.now();
-    const ao = input.mode === 'normal' ? null : ambientOcclusion(working, { samples: input.aoSamples });
+    // Per-texel AO (lazy, one occluder grid per triangle) instead of a full
+    // per-vertex pass: minutes -> seconds on dense meshes.
+    const aoField = input.mode === 'normal'
+      ? null
+      : bakeAOField(working, { samples: input.aoSamples, perTexel: input.perTexel });
     const material = project.data.materials[object.materialId];
     const baseColor = material?.baseColorFactor ?? [0.8, 0.8, 0.8, 1];
     const produced = {};
     return project.mutate(async () => {
       if (needsUv) project.setGeometry(object, working);
       if (input.mode === 'albedo' || input.mode === 'all') {
-        const bake = bakeBaseColor(working, { size: input.size, ao, pattern: input.pattern, baseColor: baseColor.slice(0, 3) });
+        const bake = bakeBaseColor(working, { size: input.size, aoField, pattern: input.pattern, baseColor: baseColor.slice(0, 3) });
         const texture = project.addTexture({ name: `${object.name}_albedo`, mimeType: 'image/png', data: bake.png, width: input.size, height: input.size, metadata: { bake: 'albedo' } });
         if (material) material.baseColorTexture = texture.id;
         produced.albedo = { textureId: texture.id, coverage: bake.coverage };
       }
       if (input.mode === 'ao') {
-        const bake = bakeAO(working, { size: input.size, ao });
+        const bake = bakeAO(working, { size: input.size, aoField });
         const texture = project.addTexture({ name: `${object.name}_ao`, mimeType: 'image/png', data: bake.png, width: input.size, height: input.size, metadata: { bake: 'ao' } });
         produced.ao = { textureId: texture.id };
       }
@@ -1160,10 +1175,41 @@ command({
         const texture = project.addTexture({ name: `${object.name}_normal`, mimeType: 'image/png', data: bake.png, width: input.size, height: input.size, metadata: { bake: 'normal' } });
         produced.normal = { textureId: texture.id };
       }
-      return { object: object.name, produced, generatedUVs: needsUv, elapsedMs: Date.now() - started, aoMean: Number((ao ? ao.reduce((a, b) => a + b, 0) / ao.length : 0).toFixed(3)) };
+      // Mean AO is a cheap, honest "how much shading did this bake capture"
+      // number for the UI and for regression tests.
+      const aoMean = aoField ? meanAO(working, aoField) : undefined;
+      return {
+        object: object.name,
+        produced,
+        generatedUVs: needsUv,
+        elapsedMs: Date.now() - started,
+        aoSamples: aoField?.samples ?? 0,
+        aoPerTexel: Boolean(aoField?.perTexel),
+        aoMean,
+      };
     }, { label: `texture.bake:${input.mode}` });
   }),
 });
+
+/**
+ * Average AO over a mesh, sampled at the midpoints of up to 4096 triangles.
+ * Used for the reported `aoMean` without paying for a full per-vertex pass.
+ */
+function meanAO(geo, aoField) {
+  const triCount = Math.floor(geo.indices.length / 3);
+  if (!triCount) return 1;
+  const stride = Math.max(1, Math.floor(triCount / 4096));
+  let sum = 0;
+  let n = 0;
+  for (let t = 0; t < triCount; t += stride) {
+    const ia = geo.indices[t * 3];
+    const ib = geo.indices[t * 3 + 1];
+    const ic = geo.indices[t * 3 + 2];
+    sum += aoField.sample({ ia, ib, ic, w0: 1 / 3, w1: 1 / 3, w2: 1 / 3 });
+    n += 1;
+  }
+  return Number((sum / Math.max(1, n)).toFixed(3));
+}
 
 async function readFileMaybe(file) {
   if (!file) fail('invalid_argument', 'Provide data (base64) or path');
@@ -1624,6 +1670,59 @@ function spawnGeneratedInProject(project, {
   };
 }
 
+function projectFootprints(project, excludeId = null) {
+  const list = [];
+  for (const obj of Object.values(project.data.objects)) {
+    if (!obj || obj.id === excludeId) continue;
+    let rawSize = null;
+    try {
+      rawSize = boundingBox(project.getGeometry(obj)).size;
+    } catch {
+      rawSize = null;
+    }
+    list.push(computeObjectFootprint(obj, rawSize));
+  }
+  return list;
+}
+
+function resolveWorldObject(project, selector = 'targeted') {
+  const sel = String(selector ?? 'targeted').trim();
+  const vr = getVrState(project);
+  if (!sel || sel === 'targeted' || sel === 'that' || sel === 'this') {
+    const targetId = vr.pointer?.hitObjectId ?? vr.pin?.objectId;
+    if (targetId && project.data.objects[targetId]) return project.data.objects[targetId];
+    const targetName = vr.pointer?.hitObjectName ?? vr.pin?.objectName;
+    if (targetName) {
+      const found = project.resolveObjects(targetName)[0];
+      if (found) return found;
+    }
+    // Fallback to most recently added object
+    const all = Object.values(project.data.objects);
+    if (all.length) return all[all.length - 1];
+    fail('object_not_found', 'No object is currently targeted or present in the scene', { status: 404 });
+  }
+  const direct = project.resolveObjects(sel)[0];
+  if (direct) return direct;
+  const lower = sel.toLowerCase();
+  const partial = Object.values(project.data.objects).filter(
+    (o) => o.name.toLowerCase().includes(lower) || (o.metadata?.archetype ?? '').toLowerCase().includes(lower),
+  );
+  if (partial.length) {
+    // Prefer targeted object if it matches, else closest to VR pointer/head
+    const targetId = vr.pointer?.hitObjectId ?? vr.pin?.objectId;
+    const hit = partial.find((o) => o.id === targetId);
+    if (hit) return hit;
+    const refPt = vr.pin?.point ?? vr.pointer?.hitPoint ?? vr.head?.position ?? [0, 0, 0];
+    partial.sort((a, b) => {
+      const pa = a.transform?.translation ?? [0, 0, 0];
+      const pb = b.transform?.translation ?? [0, 0, 0];
+      return Math.hypot(pa[0] - refPt[0], pa[2] - refPt[2]) - Math.hypot(pb[0] - refPt[0], pb[2] - refPt[2]);
+    });
+    return partial[0];
+  }
+  return project.requireObject(sel);
+}
+
 command({
   id: 'world.get',
   category: 'world',
@@ -1748,6 +1847,8 @@ command({
     scale: number().default(1),
     yaw: number().optional(),
     facePlayer: bool().default(true),
+    snap: bool().default(true),
+    gridSnap: number().default(0),
     distance: number().default(8),
     resolution: number().default(64),
   },
@@ -1759,6 +1860,8 @@ command({
     scale: z.coerce.number().min(0.05).max(30).default(1),
     yaw: z.coerce.number().optional(),
     facePlayer: z.coerce.boolean().default(true),
+    snap: z.coerce.boolean().default(true),
+    gridSnap: z.coerce.number().min(0).max(20).default(0),
     distance: z.coerce.number().min(0.5).max(120).default(8),
     resolution: z.coerce.number().int().min(24).max(160).default(64),
     pointer: z.record(z.string(), z.any()).optional(),
@@ -1778,30 +1881,213 @@ command({
       overridePointer: input.pointer,
       overrideHead: input.head,
     });
-    const yaw = input.yaw !== undefined ? Number(input.yaw) : (input.facePlayer ? loc.yawToPlayerDeg : 0);
+    const initialYaw = input.yaw !== undefined ? Number(input.yaw) : (input.facePlayer ? loc.yawToPlayerDeg : 0);
     return project.mutate(async () => {
+      const others = projectFootprints(project);
       const spawned = spawnGeneratedInProject(project, {
         prompt: input.prompt,
         name: input.name,
         position: loc.position,
-        yaw,
+        yaw: initialYaw,
         scaleMultiplier: input.scale,
         resolution: input.resolution,
       });
+
+      let finalPos = [...loc.position];
+      let finalYaw = initialYaw;
+      let snapInfo = { snapped: false, kind: 'free' };
+
+      if (input.snap || input.gridSnap > 0) {
+        const world = normalizeWorld(project.data.world);
+        const rawSize = boundingBox(project.getGeometry(spawned.object)).size;
+        const movingFp = computeObjectFootprint(spawned.object, rawSize);
+        snapInfo = solveSmartPlacement(movingFp, others, {
+          snapEnabled: input.snap,
+          gridSnap: input.gridSnap,
+          terrainHeightFn: (x, z) => terrainHeightAt(world, x, z),
+        });
+        if (snapInfo.snapped) {
+          finalPos = snapInfo.position.map((n) => Number(n.toFixed(3)));
+          finalYaw = snapInfo.yawDeg;
+          spawned.object.transform = {
+            ...spawned.object.transform,
+            translation: finalPos,
+            rotation: [0, Number(finalYaw.toFixed(2)), 0],
+          };
+        }
+      }
+
       return {
         object: {
           id: spawned.object.id,
           name: spawned.object.name,
           archetype: spawned.archetype,
-          position: loc.position,
-          yaw: Number(yaw.toFixed(2)),
+          position: finalPos,
+          yaw: Number(finalYaw.toFixed(2)),
           worldHeightMeters: spawned.worldHeightMeters,
           triangles: spawned.triangles,
         },
         placementSource: loc.source,
+        snap: snapInfo,
       };
     }, { label: `world.spawn:${input.prompt.slice(0, 28)}` });
   }),
+});
+
+command({
+  id: 'world.snap',
+  category: 'world',
+  description:
+    'Snap a fence end-to-end onto the nearest existing fence, magnetically align an object to nearby structures, or snap to a world grid.',
+  inputShape: {
+    project: z.string(),
+    object: z.string().default('targeted'),
+    mode: z.string().default('auto'),
+    gridSnap: number().default(0),
+    snapRadius: number().default(8),
+  },
+  input: schema({
+    project: z.string(),
+    object: z.string().default('targeted'),
+    mode: z.enum(['auto', 'fence', 'align', 'grid']).default('auto'),
+    gridSnap: z.coerce.number().min(0).max(20).default(0),
+    snapRadius: z.coerce.number().min(0.2).max(40).default(8),
+  }),
+  examples: ['modelstudio world.snap --project Demo --object fence_2'],
+  handler: async (input) => withProject(input.project, async (project) => project.mutate(async () => {
+    const obj = resolveWorldObject(project, input.object);
+    const world = normalizeWorld(project.data.world);
+    const terrainFn = (x, z) => terrainHeightAt(world, x, z);
+    const rawSize = boundingBox(project.getGeometry(obj)).size;
+    const movingFp = computeObjectFootprint(obj, rawSize);
+    const others = projectFootprints(project, obj.id);
+
+    let outcome = { snapped: false, kind: 'none', position: movingFp.position, yawDeg: movingFp.yawDeg };
+
+    if ((input.mode === 'auto' || input.mode === 'fence') && movingFp.archetype === 'fence') {
+      const fs = computeFenceSnap(movingFp, others, { snapRadius: input.snapRadius, terrainHeightFn: terrainFn });
+      if (fs.snapped) outcome = fs;
+    }
+    if (!outcome.snapped && (input.mode === 'auto' || input.mode === 'align')) {
+      const al = computeStructureAlignment(movingFp, others, {
+        maxRange: Math.max(14, input.snapRadius * 2),
+        angleThresholdDeg: 45,
+        axisThresholdMeters: 1.25,
+        terrainHeightFn: terrainFn,
+      });
+      if (al.aligned) outcome = { ...al, snapped: true };
+    }
+    if (!outcome.snapped && (input.mode === 'grid' || input.gridSnap > 0)) {
+      const step = input.gridSnap > 0 ? input.gridSnap : 0.5;
+      outcome = solveSmartPlacement(movingFp, [], { snapEnabled: false, gridSnap: step, terrainHeightFn: terrainFn });
+    }
+
+    if (outcome.snapped) {
+      const pos = outcome.position.map((n) => Number(n.toFixed(3)));
+      const yaw = Number(outcome.yawDeg.toFixed(2));
+      obj.transform = {
+        ...obj.transform,
+        translation: pos,
+        rotation: [0, yaw, 0],
+      };
+    }
+
+    return {
+      id: obj.id,
+      name: obj.name,
+      snapped: outcome.snapped,
+      kind: outcome.kind,
+      position: obj.transform.translation,
+      rotation: obj.transform.rotation,
+      targetName: outcome.targetName ?? null,
+    };
+  }, { label: `world.snap:${input.object}` })),
+});
+
+command({
+  id: 'world.duplicate',
+  category: 'world',
+  description:
+    'Duplicate a world object grounded on the terrain; for fences, automatically extends the fence line end-to-end onto an open post.',
+  inputShape: {
+    project: z.string(),
+    object: z.string().default('targeted'),
+    snapEndToEnd: bool().default(true),
+    cornerDeg: number().default(0),
+    offset: z.any().optional(),
+  },
+  input: schema({
+    project: z.string(),
+    object: z.string().default('targeted'),
+    snapEndToEnd: z.coerce.boolean().default(true),
+    cornerDeg: z.coerce.number().default(0),
+    offset: z.any().optional(),
+  }),
+  examples: ['modelstudio world.duplicate --project Demo --object "wooden fence"'],
+  handler: async (input) => withProject(input.project, async (project) => project.mutate(async () => {
+    const source = resolveWorldObject(project, input.object);
+    const world = normalizeWorld(project.data.world);
+    const rawSize = boundingBox(project.getGeometry(source)).size;
+    const fp = computeObjectFootprint(source, rawSize);
+    const others = projectFootprints(project, source.id);
+
+    let nextPos;
+    let nextYaw = fp.yawDeg;
+
+    if (input.offset) {
+      const off = vec3(input.offset, [0, 0, 0], 'offset');
+      nextPos = [fp.position[0] + off[0], fp.position[1] + off[1], fp.position[2] + off[2]];
+    } else if (fp.archetype === 'fence' && input.snapEndToEnd) {
+      const ends = fenceEndpoints(fp);
+      // Prefer whichever post (+X or -X) doesn't already have an adjacent fence within 0.6 m
+      const postOccupied = (pt) => others.some((o) => {
+        if (o.archetype !== 'fence') return false;
+        const oe = fenceEndpoints(o);
+        return Math.hypot(oe.plus[0] - pt[0], oe.plus[2] - pt[2]) < 0.6
+          || Math.hypot(oe.minus[0] - pt[0], oe.minus[2] - pt[2]) < 0.6;
+      });
+      const useMinus = postOccupied(ends.plus) && !postOccupied(ends.minus);
+      const anchor = useMinus ? ends.minus : ends.plus;
+      const dirSign = useMinus ? -1 : 1;
+      nextYaw = fp.yawDeg + (Number(input.cornerDeg) || 0);
+      const { localX } = localAxesFromYaw(nextYaw);
+      nextPos = [
+        anchor[0] + localX[0] * dirSign * ends.halfSpan,
+        anchor[1],
+        anchor[2] + localX[2] * dirSign * ends.halfSpan,
+      ];
+    } else {
+      const { localX } = localAxesFromYaw(fp.yawDeg);
+      const step = Math.max(1.2, fp.size[0] + 0.85);
+      nextPos = [fp.position[0] + localX[0] * step, fp.position[1], fp.position[2] + localX[2] * step];
+    }
+
+    nextPos[1] = Number(terrainHeightAt(world, nextPos[0], nextPos[2]).toFixed(3));
+    nextPos = nextPos.map((n) => Number(n.toFixed(3)));
+
+    const copy = project.addObject({
+      name: `${source.name.replace(/_\d+$/, '')}_${Object.keys(project.data.objects).length + 1}`,
+      geometry: project.getGeometry(source),
+      materialId: source.materialId,
+      transform: {
+        translation: nextPos,
+        rotation: [0, Number(nextYaw.toFixed(2)), 0],
+        scale: [...(source.transform?.scale ?? [1, 1, 1])],
+      },
+      metadata: { ...source.metadata, duplicatedFrom: source.id },
+    });
+    if (project.data.rigBindings[source.id]) {
+      project.data.rigBindings[copy.id] = project.data.rigBindings[source.id];
+    }
+
+    return {
+      id: copy.id,
+      name: copy.name,
+      position: nextPos,
+      yaw: Number(nextYaw.toFixed(2)),
+      archetype: fp.archetype,
+    };
+  }, { label: `world.duplicate:${input.object}` })),
 });
 
 command({

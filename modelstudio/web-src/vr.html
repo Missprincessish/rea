@@ -20,35 +20,69 @@
       </div>
 
       <div class="vr-top-actions">
-        <span class="vr-coord-pill" id="vr-pointer-pill" title="Click anywhere in the 3D world (or pull VR trigger) to pin 'Right There'">
-          📍 Right There: <code id="vr-coord-text">0.0, 0.0, -2.5</code>
+        <span class="vr-coord-pill" id="vr-pointer-pill" title="Click ground (or pull VR trigger) to pin 'Right There'">
+          📍 <code id="vr-coord-text">0.0, 0.0, -2.5</code>
         </span>
         <span class="vr-target-pill hidden" id="vr-target-pill">
-          🎯 Target: <code id="vr-target-text">none</code>
+          🎯 <code id="vr-target-text">none</code>
         </span>
+        <button class="vr-btn" id="btn-undo-top" title="Undo (Ctrl/Cmd+Z)">↩️ Undo</button>
+        <button class="vr-btn" id="btn-redo-top" title="Redo (Ctrl/Cmd+Y)">↪️ Redo</button>
+        <button class="vr-btn" id="btn-recenter" title="Return to the world spawn point (R)">🎯 Recenter</button>
+        <button class="vr-btn" id="btn-locomotion-drawer" title="VR Movement, Turning, Snapping &amp; Grid Settings">⚙️ Controls</button>
         <button class="vr-btn" id="btn-ai-drawer" title="Configure ChatGPT / OpenAI / Local LLM &amp; Open MCP">AI &amp; MCP</button>
         <button class="vr-btn vr-enter" id="btn-enter-vr">Enter VR (Quest / WebXR)</button>
         <button class="vr-btn vr-ar hidden" id="btn-enter-ar" title="Meta Quest 3S Color Passthrough">Passthrough AR</button>
       </div>
     </header>
 
-    <!-- Secure-context / Quest Wi-Fi helper banner (shown only if HTTP over non-localhost LAN) -->
+    <!-- Secure-context / Quest Wi-Fi helper banner -->
     <div class="vr-banner hidden" id="vr-https-warning">
       <strong>Meta Quest Wi-Fi note:</strong> WebXR &amp; voice mic require HTTPS on LAN IPs. Run
-      <code>npm run start:vr</code> (or <code>modelstudio serve --https</code>) on your MacBook and open the
-      <code>https://</code> port on your Quest 3S.
+      <code>npm run start:vr</code> on your MacBook and open the <code>https://</code> URL on your Quest 3S.
     </div>
 
-    <!-- Quick spatial chips -->
+    <!-- Placement Ghost Preview Banner (shown when previewing an object before confirming) -->
+    <div class="vr-preview-banner hidden" id="vr-preview-banner">
+      <span id="vr-preview-label">👻 Previewing: wooden fence</span>
+      <button type="button" class="vr-btn" id="btn-preview-rot-left" title="Rotate -45° (Q)">↺ -45°</button>
+      <button type="button" class="vr-btn" id="btn-preview-rot-right" title="Rotate +45° (E / R)">↻ +45°</button>
+      <button type="button" class="vr-btn" id="btn-preview-rot-90" title="Rotate 90°">↻ 90°</button>
+      <button type="button" class="vr-btn vr-enter" id="btn-preview-confirm" title="Click ground or pull VR Trigger to confirm">✓ Place Here</button>
+      <button type="button" class="vr-btn vr-danger" id="btn-preview-cancel" title="Cancel preview (Esc)">✕ Cancel</button>
+    </div>
+
+    <!-- Selected Object Inspector & Direct Manipulation Toolbar (Phase 3) -->
+    <section class="vr-inspector hidden" id="vr-object-inspector">
+      <div class="vr-inspector-title">
+        <span>✏️ Selected: <strong id="sel-obj-name">none</strong></span>
+        <span class="vr-snap-tag hidden" id="sel-snap-badge">🧲 Snapped</span>
+        <button type="button" class="vr-mini-close" id="btn-deselect" title="Deselect (Esc)">&times;</button>
+      </div>
+      <div class="vr-inspector-buttons">
+        <button type="button" data-edit="drag-toggle" id="btn-drag-move" title="Drag object across ground (or hold Grip in VR)">✋ Grab / Move</button>
+        <button type="button" data-edit="move-pin" title="Move selected object to pinned spot">📍 Move to Pin</button>
+        <button type="button" data-edit="rot-left" title="Rotate -45°">↺ -45°</button>
+        <button type="button" data-edit="rot-right" title="Rotate +45° (R)">↻ +45°</button>
+        <button type="button" data-edit="rot-90" title="Rotate +90°">↻ 90°</button>
+        <button type="button" data-edit="scale-down" title="Resize smaller ([)">➖ Smaller</button>
+        <button type="button" data-edit="scale-up" title="Resize bigger (])">➕ Bigger</button>
+        <button type="button" data-edit="snap" title="Snap fence end-to-end or align to nearest structure (F)">🧲 Snap / Align</button>
+        <button type="button" data-edit="duplicate" title="Duplicate (extends fences end-to-end automatically!) (D)">📋 Duplicate</button>
+        <button type="button" data-edit="delete" class="danger" title="Delete selected object (Del)">🗑️ Delete</button>
+      </div>
+    </section>
+
+    <!-- Build Palette + Quick Spatial Chips -->
     <div class="vr-quick-chips" id="vr-quick-chips">
-      <button data-say="make this a hayfield and put a green barn right there">🌾 Hayfield + Green Barn Here</button>
-      <button data-say="make this a pine forest at sunset">🌲 Sunset Forest</button>
-      <button data-say="make this a snowfield">❄️ Snowfield</button>
-      <button data-say="make this a starlit clearing with fireflies">✨ Night Fireflies</button>
-      <button data-say="put a windmill right there">🗼 Windmill Here</button>
-      <button data-say="put a wooden fence right there">🪵 Fence Here</button>
-      <button data-say="scatter 6 hay bales around me">🌾 Scatter Hay Bales</button>
-      <button data-say="undo">↩️ Undo</button>
+      <button type="button" data-place="wooden fence">🪵 Place Fence</button>
+      <button type="button" data-place="green barn">🏠 Place Green Barn</button>
+      <button type="button" data-place="windmill">🗼 Place Windmill</button>
+      <button type="button" data-place="grain silo">🏗️ Place Silo</button>
+      <button type="button" data-place="golden haybale">🌾 Place Hay Bale</button>
+      <button type="button" data-say="make this a hayfield">🌾 Hayfield Biome</button>
+      <button type="button" data-say="make this a pine forest at sunset">🌲 Sunset Forest</button>
+      <button type="button" data-say="make this a starlit clearing with fireflies">✨ Night Fireflies</button>
     </div>
 
     <!-- AI Reply / Transcript toast -->
@@ -66,16 +100,65 @@
       <input
         type="text"
         id="vr-prompt-input"
-        placeholder='Point anywhere (click to pin) and say or type: "chatgpt make this a hayfield and put a green barn right there"'
+        placeholder='Point or select an object &amp; say: "move that fence closer", "rotate this windmill", or "put a green barn right there"'
       />
-      <button type="submit" class="vr-send-btn" id="btn-send-prompt">Build</button>
+      <button type="submit" class="vr-send-btn" id="btn-send-prompt">Run</button>
     </form>
 
     <!-- Controls legend -->
     <div class="vr-help-hint">
-      <span><strong>Desktop:</strong> Click ground/object = pin "right there" &middot; Drag = look &middot; WASD = walk</span>
-      <span><strong>Quest 3S:</strong> Trigger = pin "right there" &middot; A/X = voice &middot; B/Y = VR menu &middot; Sticks = walk / turn / teleport</span>
+      <span><strong>Desktop:</strong> Click object = select &middot; Click ground = pin/place &middot; Drag = look &middot; WASD = walk &middot; R/[ / ]/D/F/Del = edit</span>
+      <span><strong>Quest 3S:</strong> L-Stick = walk/strafe &middot; R-Stick = smooth turn &middot; Trigger = select/place &middot; Hold Grip on object = move + R-Stick rotate/resize &middot; B/Y or ☰ = menu &middot; A/X = voice</span>
     </div>
+
+    <!-- VR Movement, Snapping & Placement Settings Drawer (Phase 1 & 3) -->
+    <aside class="vr-drawer vr-drawer-left hidden" id="locomotion-drawer">
+      <div class="vr-drawer-head">
+        <h2>VR Controls &amp; Snapping</h2>
+        <button class="vr-close" id="btn-close-locomotion">&times;</button>
+      </div>
+
+      <label class="vr-field">
+        <span>Walk Speed (<output id="out-move-speed">4.5</output> m/s)</span>
+        <input type="range" id="rng-move-speed" min="1.5" max="9.0" step="0.5" value="4.5" />
+      </label>
+
+      <label class="vr-field">
+        <span>Right Stick Turning Mode</span>
+        <select id="sel-turn-mode">
+          <option value="smooth">Smooth Turning (fluid)</option>
+          <option value="snap">Snap Turning (comfort steps)</option>
+        </select>
+      </label>
+
+      <label class="vr-field">
+        <span>Smooth Turn Speed (<output id="out-turn-speed">95</output>°/s)</span>
+        <input type="range" id="rng-turn-speed" min="40" max="180" step="5" value="95" />
+      </label>
+
+      <label class="vr-field">
+        <span>Snap Turn Step</span>
+        <select id="sel-snap-angle">
+          <option value="30">30°</option>
+          <option value="45">45°</option>
+        </select>
+      </label>
+
+      <div class="vr-toggle-list">
+        <label class="vr-check"><input type="checkbox" id="chk-teleport" /> Optional Right-Stick-Forward Teleport Arc</label>
+        <label class="vr-check"><input type="checkbox" id="chk-snap" checked /> Magnetic Fence End-to-End &amp; Structure Alignment</label>
+        <label class="vr-check"><input type="checkbox" id="chk-preview" checked /> Preview 3D Ghost Before Placing Objects</label>
+      </div>
+
+      <label class="vr-field" style="margin-top:10px">
+        <span>Grid Snapping</span>
+        <select id="sel-grid-snap">
+          <option value="0">Off (free + magnetic fence/structure snap)</option>
+          <option value="0.5">0.5 m Grid + 15° Angle Snap</option>
+          <option value="1">1.0 m Grid + 15° Angle Snap</option>
+        </select>
+      </label>
+    </aside>
 
     <!-- Open MCP & AI Provider Drawer -->
     <aside class="vr-drawer hidden" id="ai-drawer">

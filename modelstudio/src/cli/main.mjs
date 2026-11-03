@@ -60,6 +60,8 @@ const ALIASES = {
   biome: 'world.environment',
   spawn: 'world.spawn',
   scatter: 'world.scatter',
+  snap: 'world.snap',
+  extend: 'world.duplicate',
   say: 'world.prompt',
   vr: 'vr.context',
   serve: '__serve',

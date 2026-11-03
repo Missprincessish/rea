@@ -9,9 +9,44 @@ import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 import { geometryFromPayload } from './viewport.js';
 import { api } from './api.js';
 import { defaultWorld, normalizeWorld, terrainHeightAt } from '../src/core/world.mjs';
+import { createVrEditor } from './vr-editor.js';
+import {
+  DEFAULT_VR_SETTINGS,
+  SPEED_PRESETS,
+  computeFenceSnap,
+  computeLocomotionStep,
+  computeMenuSummonPose,
+  computeObjectFootprint,
+  computeStructureAlignment,
+  evaluateMenuAction,
+  extractYawDeg,
+  localAxesFromYaw,
+  normalizeAngleDeg,
+  parseQuestGamepad,
+  snapPoseToGrid,
+  solveSmartPlacement,
+} from '../src/core/vr-interaction.mjs';
 
 const $ = (sel) => document.querySelector(sel);
 const DEG = Math.PI / 180;
+
+/** Persisted VR comfort/precision settings (per browser, restored on reload). */
+function loadVrSettings() {
+  try {
+    const raw = JSON.parse(localStorage.getItem('modelstudio.vrSettings') || '{}');
+    return { ...DEFAULT_VR_SETTINGS, ...raw };
+  } catch {
+    return { ...DEFAULT_VR_SETTINGS };
+  }
+}
+
+function saveVrSettings() {
+  try {
+    localStorage.setItem('modelstudio.vrSettings', JSON.stringify(state.settings));
+  } catch {
+    /* private mode */
+  }
+}
 
 const state = {
   project: new URLSearchParams(location.search).get('project') || localStorage.getItem('modelstudio.project') || 'Demo',
@@ -24,6 +59,18 @@ const state = {
   yaw: 0,
   pitch: -0.08,
   keys: new Set(),
+  settings: loadVrSettings(),
+  objects: [],
+  selectedId: null,
+  // Object being dragged/moved by hand (VR grab) or mouse drag (desktop)
+  dragging: null,
+  preview: null,
+  pointerDownObjectId: null,
+  pointerDownAt: 0,
+  teleportPreview: null,
+  menuGrab: null,
+  boardhover: null,
+  snapHint: '',
   pointer: {
     active: true,
     hand: 'screen',
@@ -172,9 +219,27 @@ for (let i = 0; i < 2; i += 1) {
     activeControllerIdx = i;
     onVrSelect(controller);
   });
+  controller.addEventListener('selectend', () => {
+    activeControllerIdx = i;
+    if (state.menuGrab) {
+      state.menuGrab = null;
+      return;
+    }
+    if (state.dragging) editor.endGrab();
+  });
+  // Grip = summon-only (never dismisses) and grabs the selected object while held
   controller.addEventListener('squeezestart', () => {
     activeControllerIdx = i;
-    summonVrHudInFront();
+    if (!editor) return;
+    editor.summonMenu();
+    const hitId = state.pointer.hitObjectId;
+    if (hitId) {
+      editor.selectObject(hitId);
+      editor.startGrab({ pointer: state.pointer.hitPoint });
+    }
+  });
+  controller.addEventListener('squeezeend', () => {
+    if (editor) editor.endGrab();
   });
   playerRig.add(controller);
   controllers.push({ controller, rayLine, index: i });
@@ -200,86 +265,233 @@ const vrBoardMesh = new THREE.Mesh(
 vrBoardMesh.visible = false;
 playerRig.add(vrBoardMesh);
 
-const VR_BOARD_BUTTONS = [
-  { id: 'speak', label: '🎤 Speak Command', x: 36, y: 170, w: 300, h: 72, accent: true },
-  { id: 'pin', label: '📍 Pin Spot', x: 356, y: 170, w: 300, h: 72 },
-  { id: 'undo', label: '↩️ Undo', x: 676, y: 170, w: 312, h: 72 },
+vrBoardMesh.renderOrder = 5;
 
-  { id: 'cmd:make this a hayfield and put a green barn right there', label: '🌾 Hayfield + Green Barn', x: 36, y: 268, w: 466, h: 68 },
-  { id: 'cmd:make this a pine forest at sunset', label: '🌲 Sunset Pine Forest', x: 522, y: 268, w: 466, h: 68 },
+// --- Persistent Wrist/HUD "☰ Menu" pill (always reachable in VR & desktop) --
+//
+// The floating board can end up anywhere after dragging, so this small pill is
+// re-pinned 35cm in front of the user's left wrist (or bottom-left of the
+// desktop viewport) every frame. It re-summons the board with one tap and never
+// dismisses it.
 
-  { id: 'cmd:put a green barn right there', label: '🏠 Barn Here', x: 36, y: 356, w: 224, h: 66 },
-  { id: 'cmd:put a windmill right there', label: '🗼 Windmill', x: 276, y: 356, w: 224, h: 66 },
-  { id: 'cmd:put a wooden fence right there', label: '🪵 Fence Here', x: 516, y: 356, w: 224, h: 66 },
-  { id: 'cmd:scatter 6 hay bales around me', label: '🌾 +Hay Bales', x: 756, y: 356, w: 232, h: 66 },
+function buildWristPillTexture(text) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 128;
+  const c = canvas.getContext('2d');
+  c.clearRect(0, 0, 256, 128);
+  c.fillStyle = 'rgba(9, 20, 22, 0.94)';
+  roundRect(c, 4, 4, 248, 120, 26);
+  c.fill();
+  c.lineWidth = 6;
+  c.strokeStyle = '#2ce8c4';
+  c.stroke();
+  c.fillStyle = '#2ce8c4';
+  c.font = 'bold 62px sans-serif';
+  c.fillText('☰', 30, 90);
+  c.fillStyle = '#eafaf5';
+  c.font = 'bold 34px sans-serif';
+  c.fillText(text, 104, 84);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 
-  { id: 'cmd:make this a snowfield', label: '❄️ Snowfield', x: 36, y: 442, w: 224, h: 66 },
-  { id: 'cmd:make this a starlit clearing with fireflies', label: '✨ Night Fireflies', x: 276, y: 442, w: 224, h: 66 },
-  { id: 'cmd:delete that', label: '🗑️ Delete Target', x: 516, y: 442, w: 224, h: 66 },
-  { id: 'exit-vr', label: '🚪 Exit VR', x: 756, y: 442, w: 232, h: 66 },
+const wristPill = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.20, 0.10),
+  new THREE.MeshBasicMaterial({ map: buildWristPillTexture('MENU'), transparent: true, side: THREE.DoubleSide, depthTest: false }),
+);
+wristPill.name = 'wrist-menu-pill';
+wristPill.renderOrder = 999;
+wristPill.visible = false;
+scene.add(wristPill);
+
+// --- Live editing engine (locomotion, selection, snapping, board actions) --
+// Declared before the board helpers that reference it; assigned right after.
+
+let editor = null;
+
+
+/**
+ * Floating VR Command Board layout.
+ *
+ * Everything is drawn into one 1024x640 canvas mapped onto a 1.18m x 0.74m
+ * plane floating 1.25m in front of the headset, so each 72px row is a ~13cm
+ * tall physical target that is easy to hit with a Quest 3S controller ray.
+ *
+ * `header` is the drag handle: grip/trigger-drag anywhere in that strip moves
+ * the whole board around the world and it stays where you left it.
+ */
+const BOARD_W = 1024;
+const BOARD_H = 640;
+
+const BOARD_TABS = [
+  { id: 'tab:world', label: '🌍 World & AI', x: 20, y: 122, w: 490, h: 60 },
+  { id: 'tab:object', label: '✏️ Object Edit', x: 514, y: 122, w: 490, h: 60 },
 ];
 
-function redrawVrBoard(hoverId = null) {
+const BOARD_ROWS_WORLD = [
+  [
+    { id: 'cmd:make this a hayfield and put a green barn right there', label: '🌾 Hayfield + Barn', w: 466 },
+    { id: 'cmd:make this a pine forest at sunset', label: '🌲 Sunset Forest', w: 466 },
+  ],
+  [
+    { id: 'place:green barn', label: '🏠 Place Barn', w: 224 },
+    { id: 'place:tall windmill', label: '🗼 Place Windmill', w: 224 },
+    { id: 'place:wooden fence', label: '🪵 Place Fence', w: 224 },
+    { id: 'place:golden haybale', label: '🌾 Place Hay Bale', w: 232 },
+  ],
+  [
+    { id: 'cmd:make this a snowfield', label: '❄️ Snowfield', w: 224 },
+    { id: 'cmd:make this a starlit clearing with fireflies', label: '✨ Night Fireflies', w: 224 },
+    { id: 'cmd:scatter 6 hay bales around me', label: '🌾 +Hay Bales', w: 224 },
+    { id: 'cmd:extend that fence', label: '🧲 Extend Fence', w: 232 },
+  ],
+];
+
+const BOARD_ROWS_OBJECT = [
+  [
+    { id: 'rotate-l', label: '↺ -45°', w: 150 },
+    { id: 'rotate-r', label: '↻ +45°', w: 150 },
+    { id: 'rotate-90', label: '↻ 90°', w: 150 },
+    { id: 'bigger', label: '➕ Bigger', w: 158 },
+    { id: 'smaller', label: '➖ Smaller', w: 166 },
+  ],
+  [
+    { id: 'grab', label: '✋ Grab / Move', w: 200 },
+    { id: 'snap', label: '🧲 Snap / Align', w: 210 },
+    { id: 'duplicate', label: '📋 Duplicate', w: 200 },
+    { id: 'delete', label: '🗑️ Delete', w: 160 },
+    { id: 'deselect', label: '✖ Deselect', w: 174 },
+  ],
+];
+
+const BOARD_BOTTOM = [
+  { id: 'speak', label: '🎤 Speak', x: 20, y: 548, w: 300, h: 74, accent: true },
+  { id: 'undo', label: '↩️ Undo', x: 332, y: 548, w: 210, h: 74 },
+  { id: 'redo', label: '↪️ Redo', x: 554, y: 548, w: 210, h: 74 },
+  { id: 'exit-vr', label: '🚪 Exit VR', x: 776, y: 548, w: 228, h: 74 },
+];
+
+let boardTab = 'tab:world';
+let hoverId = null;
+
+/**
+ * Compute the current interactive layout: drag strip + tabs + rows (+ bottom
+ * bar). Rows are laid out horizontally with generous gutters.
+ */
+function boardLayout() {
+  const buttons = [];
+  for (const tab of BOARD_TABS) buttons.push({ ...tab, kind: 'tab' });
+
+  const rows = boardTab === 'tab:object' ? BOARD_ROWS_OBJECT : BOARD_ROWS_WORLD;
+  let y = 196;
+  for (const row of rows) {
+    const gap = 12;
+    const total = row.reduce((sum, b) => sum + b.w, 0) + gap * (row.length - 1);
+    let x = 20 + Math.max(0, (BOARD_W - 40 - total) / 2);
+    for (const b of row) {
+      buttons.push({ ...b, x, y, h: 72, kind: 'row' });
+      x += b.w + gap;
+    }
+    y += 84;
+  }
+
+  for (const b of BOARD_BOTTOM) buttons.push({ ...b, kind: 'bottom' });
+
+  return {
+    buttons,
+    dragStrip: { id: 'drag', x: 16, y: 14, w: BOARD_W - 32, h: 96 },
+  };
+}
+
+function redrawVrBoard(hover = hoverId) {
+  hoverId = hover ?? null;
   const ctx = vrBoardCtx;
-  ctx.clearRect(0, 0, 1024, 640);
+  const layout = boardLayout();
+  ctx.clearRect(0, 0, BOARD_W, BOARD_H);
 
   // Panel background
-  ctx.fillStyle = 'rgba(8, 14, 18, 0.92)';
-  roundRect(ctx, 8, 8, 1008, 624, 28);
+  ctx.fillStyle = 'rgba(8, 14, 18, 0.94)';
+  roundRect(ctx, 8, 8, BOARD_W - 16, BOARD_H - 16, 28);
   ctx.fill();
   ctx.lineWidth = 3;
   ctx.strokeStyle = '#2ce8c4';
   ctx.stroke();
 
-  // Header
+  // Drag-handle strip: subtle dots + instruction, so users know they can move it
+  ctx.fillStyle = 'rgba(44, 232, 196, 0.10)';
+  roundRect(ctx, 16, 14, BOARD_W - 32, 96, 18);
+  ctx.fill();
+
   ctx.fillStyle = '#2ce8c4';
-  ctx.font = 'bold 28px sans-serif';
-  ctx.fillText(`MODELSTUDIO VR · ${state.project.toUpperCase()} (${state.world.biome})`, 36, 58);
+  ctx.font = 'bold 26px sans-serif';
+  const selected = state.selectedId ? state.objects.find((o) => o.id === state.selectedId) : null;
+  ctx.fillText(`MODELSTUDIO VR · ${state.project.toUpperCase()} · ${state.world.biome}`, 36, 50);
 
   const pt = state.pin?.point ?? state.pointer.hitPoint;
   ctx.fillStyle = '#f5b942';
-  ctx.font = '22px monospace';
+  ctx.font = '20px monospace';
   ctx.fillText(
-    `📍 Right There: (${pt.map((n) => Number(n).toFixed(1)).join(', ')})   🎯 Target: ${state.pointer.hitObjectName ?? 'ground'}`,
+    `📍 ${pt.map((n) => Number(n).toFixed(1)).join(', ')}   🎯 ${state.pointer.hitObjectName ?? 'ground'}   ${selected ? `✏️ ${selected.name}` : ''}`,
     36,
-    102,
+    84,
   );
 
+  ctx.fillStyle = 'rgba(220, 245, 238, 0.55)';
+  ctx.font = '17px sans-serif';
+  ctx.fillText('⠿ drag this bar to move the board', BOARD_W - 300, 50);
+
   ctx.fillStyle = state.recording ? '#ff7b7b' : '#b8ded4';
-  ctx.font = '21px sans-serif';
+  ctx.font = '19px sans-serif';
   const statusMsg = state.recording
-    ? '🔴 Listening… speak now (e.g. "make this a hayfield and put a green barn right there")'
+    ? '🔴 Listening… speak now'
     : state.busy
       ? '⏳ Building in 3D world…'
-      : state.lastStatusText;
-  ctx.fillText(statusMsg.slice(0, 78), 36, 142);
+      : (state.snapHint || state.lastStatusText);
+  ctx.fillText(statusMsg.slice(0, 84), 36, 112);
 
-  for (const btn of VR_BOARD_BUTTONS) {
-    const isHover = hoverId === btn.id;
+  for (const btn of layout.buttons) {
+    const isHover = hover === btn.id;
     const isRec = btn.id === 'speak' && state.recording;
+    const activeTab = btn.kind === 'tab' && boardTab === btn.id;
     ctx.fillStyle = isRec
       ? '#c93838'
       : btn.accent
         ? (isHover ? '#48ffdc' : '#2ce8c4')
-        : (isHover ? 'rgba(44, 232, 196, 0.32)' : 'rgba(255, 255, 255, 0.09)');
+        : activeTab
+          ? 'rgba(44, 232, 196, 0.34)'
+          : (isHover ? 'rgba(44, 232, 196, 0.30)' : 'rgba(255, 255, 255, 0.09)');
     roundRect(ctx, btn.x, btn.y, btn.w, btn.h, 14);
     ctx.fill();
-    ctx.strokeStyle = isHover ? '#ffffff' : 'rgba(44, 232, 196, 0.38)';
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = isHover || activeTab ? '#ffffff' : 'rgba(44, 232, 196, 0.38)';
+    ctx.lineWidth = isHover || activeTab ? 3 : 2;
     ctx.stroke();
 
     ctx.fillStyle = btn.accent && !isRec ? '#041411' : '#eefcf8';
-    ctx.font = 'bold 23px sans-serif';
-    ctx.fillText(btn.id === 'speak' && state.recording ? '⏹ Stop & Run' : btn.label, btn.x + 18, btn.y + 44);
+    ctx.font = `bold ${btn.h >= 70 ? 23 : 21}px sans-serif`;
+    const label = btn.id === 'speak' && state.recording ? '⏹ Stop & Run' : btn.label;
+    ctx.fillText(label, btn.x + 16, btn.y + btn.h / 2 + 8);
+  }
+
+  // Object tab with nothing selected: friendly guidance instead of dead buttons
+  if (boardTab === 'tab:object' && !selected) {
+    ctx.fillStyle = 'rgba(245, 185, 66, 0.14)';
+    roundRect(ctx, 20, 372, BOARD_W - 40, 130, 14);
+    ctx.fill();
+    ctx.fillStyle = '#ffe6a8';
+    ctx.font = '20px sans-serif';
+    ctx.fillText('Point at any object and pull the Trigger to select it.', 44, 420);
+    ctx.fillText('Then rotate, resize, snap, duplicate or delete it here — or grab it with Grip.', 44, 456);
   }
 
   if (state.lastReplyText) {
     ctx.fillStyle = 'rgba(44, 232, 196, 0.14)';
-    roundRect(ctx, 36, 530, 952, 76, 12);
+    roundRect(ctx, 20, 470, BOARD_W - 40, 66, 12);
     ctx.fill();
     ctx.fillStyle = '#d9fff5';
-    ctx.font = '21px sans-serif';
-    ctx.fillText(`AI: ${state.lastReplyText.slice(0, 82)}`, 54, 576);
+    ctx.font = '19px sans-serif';
+    ctx.fillText(`AI: ${state.lastReplyText.slice(0, 88)}`, 38, 510);
   }
 
   vrBoardTex.needsUpdate = true;
@@ -295,23 +507,42 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-function summonVrHudInFront() {
-  const xrCam = renderer.xr.isPresenting ? renderer.xr.getCamera() : camera;
-  const localPos = new THREE.Vector3();
-  const localQuat = new THREE.Quaternion();
-  xrCam.getWorldPosition(localPos);
-  xrCam.getWorldQuaternion(localQuat);
-  playerRig.worldToLocal(localPos);
+/** Hit-test the board canvas UV against tabs / rows / drag strip. */
+function hitTestBoard(uv) {
+  if (!uv) return { kind: 'none', id: null };
+  const px = uv.x * BOARD_W;
+  const py = (1 - uv.y) * BOARD_H;
+  const { buttons, dragStrip } = boardLayout();
+  const btn = buttons.find((b) => px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h);
+  if (btn) return { kind: 'button', id: btn.id };
+  const strip = dragStrip;
+  if (px >= strip.x && px <= strip.x + strip.w && py >= strip.y && py <= strip.y + strip.h) {
+    return { kind: 'drag', id: 'drag' };
+  }
+  return { kind: 'panel', id: null };
+}
 
-  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(xrCam.quaternion);
-  forward.y = 0;
-  if (forward.lengthSq() < 1e-4) forward.set(0, 0, -1);
-  forward.normalize();
-
-  vrBoardMesh.position.copy(localPos).addScaledVector(forward, 1.35);
-  vrBoardMesh.position.y = Math.max(0.95, localPos.y - 0.18);
-  vrBoardMesh.lookAt(playerRig.localToWorld(localPos.clone()));
+/**
+ * Place the board ~1.25m in front of the user's current WORLD-SPACE gaze using
+ * the shared `computeMenuSummonPose` helper (which correctly accounts for the
+ * `playerRig.rotation.y` yaw after smooth/snap turning).
+ */
+function placeBoard() {
+  const head = editor.headArrays();
+  const pose = computeMenuSummonPose({
+    headWorldPos: head.position,
+    headWorldForward: head.forward,
+    distance: 1.28,
+    verticalOffset: -0.14,
+    minHeightAboveFloor: 0.95,
+  });
+  playerRig.worldToLocal(vrBoardMesh.position.set(...pose.position));
+  vrBoardMesh.rotation.set(0, pose.yawRad - playerRig.rotation.y, 0);
   vrBoardMesh.visible = true;
+}
+
+function summonVrHudInFront() {
+  placeBoard();
   redrawVrBoard();
 }
 
@@ -638,11 +869,43 @@ async function syncWorld({ force = false } = {}) {
       objectsGroup.add(mesh);
       objectMeshes.set(obj.id, mesh);
     }
+
+    state.objects = Array.isArray(data.objects) ? data.objects : [];
+    redrawVrBoard();
+    if (state.selectedId && !state.objects.some((o) => o.id === state.selectedId)) {
+      state.selectedId = null;
+    }
+    if (editor) {
+      editor.refreshSelectionVisual();
+      editor.renderSelectionUi();
+    }
     redrawVrBoard();
   } catch (err) {
     console.warn('[vr-sync]', err);
   }
 }
+
+// --- Instantiate the shared VR/desktop editing engine ----------------------
+
+editor = createVrEditor({
+  THREE,
+  renderer,
+  camera,
+  playerRig,
+  scene,
+  objectsGroup,
+  api,
+  state,
+  $,
+  terrainHeightAt: (world, x, z) => terrainHeightAt(world, x, z),
+  showReply,
+  submitSpatialPrompt,
+  refresh: () => syncWorld({ force: true }),
+  pinCurrentSpot: () => pinCurrentSpot(),
+  boardMesh: () => vrBoardMesh,
+  placeBoard: () => placeBoard(),
+  redrawBoard: () => redrawVrBoard(),
+});
 
 // --- Raycasting & Spatial Pinning -----------------------------------------
 
@@ -650,22 +913,40 @@ const raycaster = new THREE.Raycaster();
 const screenNdc = new THREE.Vector2(0, -0.1);
 const tempMatrix = new THREE.Matrix4();
 
+
+/**
+ * Single ray gather used by VR controllers, hand rays and the desktop mouse.
+ *
+ * Priority order (so nothing ever blocks a world edit):
+ *   1. The wrist "☰ MENU" pill (tiny, always-on, never hides the world)
+ *   2. The floating command board (with generous hit rectangles)
+ *   3. The selected object's grab handle / world objects
+ *   4. Terrain
+ */
 function raycastFromRay(originVec, dirVec, handLabel = 'right') {
   raycaster.set(originVec, dirVec);
   raycaster.far = 160;
 
-  // Check 3D VR Board first when visible in VR
-  if (vrBoardMesh.visible && renderer.xr.isPresenting) {
-    const boardHit = raycaster.intersectObject(vrBoardMesh, false)[0];
-    if (boardHit && boardHit.uv) {
-      const px = boardHit.uv.x * 1024;
-      const py = (1 - boardHit.uv.y) * 640;
-      const hovered = VR_BOARD_BUTTONS.find((b) => px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h);
-      redrawVrBoard(hovered?.id ?? null);
-      return { boardHit, hoveredButton: hovered ?? null, distance: boardHit.distance };
+  // 1. Wrist pill
+  if (wristPill.visible) {
+    const pillHit = raycaster.intersectObject(wristPill, false)[0];
+    if (pillHit && pillHit.distance < 3.2) {
+      return { kind: 'wrist', hit: pillHit, distance: pillHit.distance };
     }
   }
 
+  // 2. Floating board
+  if (vrBoardMesh.visible) {
+    const boardHit = raycaster.intersectObject(vrBoardMesh, false)[0];
+    if (boardHit && boardHit.uv) {
+      const zone = hitTestBoard(boardHit.uv);
+      redrawVrBoard(zone.kind === 'button' ? zone.id : null);
+      return { kind: 'board', boardHit, zone, uv: boardHit.uv, distance: boardHit.distance };
+    }
+    redrawVrBoard(null);
+  }
+
+  // 3. World objects & terrain
   const targets = [...objectsGroup.children];
   if (terrainMesh) targets.push(terrainMesh);
   const hits = raycaster.intersectObjects(targets, false);
@@ -673,7 +954,9 @@ function raycastFromRay(originVec, dirVec, handLabel = 'right') {
     const hit = hits[0];
     const isTerrain = hit.object === terrainMesh;
     const p = hit.point;
-    const n = hit.face?.normal ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld) : new THREE.Vector3(0, 1, 0);
+    const n = hit.face?.normal
+      ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld)
+      : new THREE.Vector3(0, 1, 0);
     state.pointer = {
       active: true,
       hand: handLabel,
@@ -688,11 +971,20 @@ function raycastFromRay(originVec, dirVec, handLabel = 'right') {
     hoverReticle.visible = true;
     hoverReticle.position.copy(p).addScaledVector(n, 0.025);
     hoverReticle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+    // Highlight a hovered object so users can tell what the trigger will select
+    hoverReticle.material.color.setHex(state.pointer.hitObjectId ? 0xf5b942 : 0x2ce8c4);
     updatePointerHud();
-    return { worldHit: hit, distance: hit.distance };
+    return {
+      kind: 'world',
+      worldHit: hit,
+      objectId: state.pointer.hitObjectId,
+      objectName: state.pointer.hitObjectName,
+      point: state.pointer.hitPoint,
+      distance: hit.distance,
+    };
   }
   hoverReticle.visible = false;
-  return null;
+  return { kind: 'none' };
 }
 
 function pinCurrentSpot() {
@@ -722,29 +1014,59 @@ function updatePointerHud() {
   }
 }
 
-function onVrSelect(controller) {
+/**
+ * Trigger / A-button press in VR. Selects objects, confirms ghost placement,
+ * handles board taps and can drag the board from its header strip.
+ */
+function onVrSelect(controller, { long = false } = {}) {
   tempMatrix.identity().extractRotation(controller.matrixWorld);
   const origin = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
   const dir = new THREE.Vector3(0, 0, -1).applyMatrix4(tempMatrix).normalize();
   const res = raycastFromRay(origin, dir, 'vr-controller');
-  if (res?.boardHit && res.hoveredButton) {
-    handleVrBoardAction(res.hoveredButton.id);
+
+  if (res.kind === 'wrist') {
+    editor.ensureMenuVisible();
     return;
   }
-  pinCurrentSpot();
-}
+  if (res.kind === 'board') {
+    if (res.zone.kind === 'drag') {
+      editor.beginBoardDrag(res.uv);
+      state.menuGrab = {
+        planeY: vrBoardMesh.getWorldPosition(new THREE.Vector3()).y,
+        lastUv: res.uv,
+      };
+      return;
+    }
+    if (res.zone.kind === 'button') {
+      if (res.zone.id.startsWith('tab:')) {
+        boardTab = res.zone.id;
+        redrawVrBoard();
+        return;
+      }
+      editor.runBoardAction(res.zone.id);
+      return;
+    }
+    return;
+  }
 
-async function handleVrBoardAction(id) {
-  if (id === 'speak') {
-    toggleVoiceCapture();
-  } else if (id === 'pin') {
-    pinCurrentSpot();
-  } else if (id === 'undo') {
-    await submitSpatialPrompt('undo');
-  } else if (id === 'exit-vr') {
-    renderer.xr.getSession()?.end();
-  } else if (id.startsWith('cmd:')) {
-    await submitSpatialPrompt(id.slice(4));
+  // Ghost placement: the first trigger press drops the preview right there.
+  if (state.preview) {
+    editor.confirmPreview();
+    return;
+  }
+
+  if (res.kind === 'world' && res.objectId) {
+    editor.selectObject(res.objectId, { announce: true });
+    return;
+  }
+
+  // Ground click: move the selected object there, otherwise pin "right there"
+  if (res.kind === 'world') {
+    if (state.selectedId) {
+      editor.moveSelectedTo(res.point);
+    } else {
+      pinCurrentSpot();
+    }
   }
 }
 
@@ -969,21 +1291,44 @@ function setRecordingState(active) {
   redrawVrBoard();
 }
 
-// --- Desktop Controls (Mouse Look + Click-to-Pin + WASD Walk) -------------
+// --- Desktop Controls (Mouse Look + Click-to-Select/Drag + WASD Walk) -----
 
 let draggingLook = false;
 let pointerDownPos = [0, 0];
+let pointerDragObject = null;
 
 renderer.domElement.addEventListener('pointerdown', (e) => {
   if (renderer.xr.isPresenting) return;
   draggingLook = true;
   pointerDownPos = [e.clientX, e.clientY];
+  screenNdc.x = (e.clientX / window.innerWidth) * 2 - 1;
+  screenNdc.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(screenNdc, camera);
+  const hit = raycastFromRay(raycaster.ray.origin, raycaster.ray.direction, 'screen');
+  // Click-drag an existing object to move it (Phase 3 desktop parity)
+  if (hit.kind === 'world' && hit.objectId) {
+    pointerDragObject = hit.objectId;
+    editor.selectObject(hit.objectId);
+    editor.startGrab({ pointer: hit.point });
+  } else {
+    pointerDragObject = null;
+  }
 });
 
 window.addEventListener('pointermove', (e) => {
   if (renderer.xr.isPresenting) return;
   screenNdc.x = (e.clientX / window.innerWidth) * 2 - 1;
   screenNdc.y = -(e.clientY / window.innerHeight) * 2 + 1;
+
+  // Dragging an object with the mouse: follow the cursor across the terrain
+  if (pointerDragObject) {
+    raycaster.setFromCamera(screenNdc, camera);
+    const hit = raycastFromRay(raycaster.ray.origin, raycaster.ray.direction, 'screen');
+    if (hit.kind === 'world') {
+      editor.moveSelectedTo(hit.point, { silent: true });
+    }
+    return;
+  }
 
   if (draggingLook) {
     const dx = e.movementX || 0;
@@ -997,78 +1342,133 @@ window.addEventListener('pointerup', (e) => {
   if (renderer.xr.isPresenting) return;
   const moved = Math.hypot(e.clientX - pointerDownPos[0], e.clientY - pointerDownPos[1]);
   draggingLook = false;
+
+  if (pointerDragObject) {
+    const id = pointerDragObject;
+    pointerDragObject = null;
+    if (editor.endGrab()) return;
+    editor.selectObject(id);
+    return;
+  }
+
   if (moved < 6 && e.target === renderer.domElement) {
     raycaster.setFromCamera(screenNdc, camera);
-    raycastFromRay(raycaster.ray.origin, raycaster.ray.direction, 'screen');
-    pinCurrentSpot();
+    const hit = raycastFromRay(raycaster.ray.origin, raycaster.ray.direction, 'screen');
+    if (hit.kind === 'world') {
+      if (state.preview) {
+        editor.confirmPreview();
+      } else if (hit.objectId) {
+        editor.selectObject(hit.objectId, { announce: true });
+      } else if (state.selectedId) {
+        editor.moveSelectedTo(hit.point);
+      } else {
+        pinCurrentSpot();
+      }
+    }
   }
 });
 
 window.addEventListener('keydown', (e) => {
-  if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+  const typing = document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA';
+  if (typing) return;
   state.keys.add(e.code);
+
+  const meta = e.metaKey || e.ctrlKey;
+  // Undo / redo
+  if (meta && e.code === 'KeyZ') { e.preventDefault(); if (e.shiftKey) editor.redo(); else editor.undo(); return; }
+  if (meta && e.code === 'KeyY') { e.preventDefault(); editor.redo(); return; }
+
+  if (e.code === 'Escape') {
+    if (state.preview) editor.clearPreview();
+    else if (state.dragging) editor.cancelDrag();
+    else editor.deselect();
+    return;
+  }
+  if (e.code === 'Delete' || e.code === 'Backspace') { e.preventDefault(); editor.deleteSelected(); return; }
+  if (e.code === 'KeyR') {
+    if (state.preview) editor.rotatePreview(45); else editor.rotateSelected(45);
+    return;
+  }
+  if (e.code === 'KeyQ') {
+    if (state.preview) editor.rotatePreview(-45); else editor.rotateSelected(-45);
+    return;
+  }
+  if (e.code === 'KeyE') { editor.rotatePreview(90); return; }
+  if (e.code === 'KeyD') { editor.duplicateSelected(); return; }
+  if (e.code === 'KeyF') { editor.snapSelected(); return; }
+  if (e.code === 'BracketLeft') { editor.resizeSelected(0.88); return; }
+  if (e.code === 'BracketRight') { editor.resizeSelected(1.14); return; }
+  if (e.code === 'KeyM' || e.code === 'Tab') { e.preventDefault(); toggleBoardFromUi(); return; }
 });
 window.addEventListener('keyup', (e) => state.keys.delete(e.code));
 
-// --- Quest Touch Plus Thumbstick Locomotion, Snap-Turn & Button Shortcuts -
+// --- Quest Touch Plus input contract (see src/core/vr-interaction.mjs) ----
 
-let snapTurnCooldown = 0;
-let teleportCooldown = 0;
-const prevButtons = new Map();
+function uiLocomotionBlocked() {
+  // Never walk/turn while the user is grabbing the menu board or an object.
+  return Boolean(state.menuGrab || state.dragging);
+}
+
+/**
+ * While the user holds the trigger on the board's drag strip, slide the board
+ * along a horizontal plane at the height it was grabbed, keeping it within
+ * comfortable reach (0.9m – 2.6m from the head).
+ */
+const boardDragRay = new THREE.Ray();
+const boardDragPlane = new THREE.Plane();
+const boardDragPoint = new THREE.Vector3();
+
+function updateBoardDrag(origin, dir) {
+  if (!state.menuGrab) return;
+  boardDragRay.set(origin, dir);
+  boardDragPlane.set(new THREE.Vector3(0, 1, 0), -state.menuGrab.planeY);
+  const hit = boardDragRay.intersectPlane(boardDragPlane, boardDragPoint);
+  if (!hit) return;
+
+  const head = editor.headArrays();
+  const dx = hit.x - head.position[0];
+  const dz = hit.z - head.position[2];
+  const dist = Math.hypot(dx, dz);
+  const clamped = Math.max(0.9, Math.min(2.6, dist));
+  const k = dist > 1e-4 ? clamped / dist : 1;
+  const world = new THREE.Vector3(head.position[0] + dx * k, state.menuGrab.planeY, head.position[2] + dz * k);
+
+  playerRig.worldToLocal(world);
+  vrBoardMesh.position.copy(world);
+  vrBoardMesh.lookAt(playerRig.localToWorld(editor.headPose().pos.clone()));
+  vrBoardMesh.visible = true;
+}
 
 function updateVrGamepads(dt) {
-  const session = renderer.xr.getSession();
-  if (!session) return;
-  snapTurnCooldown = Math.max(0, snapTurnCooldown - dt);
-  teleportCooldown = Math.max(0, teleportCooldown - dt);
+  if (!editor) return;
+  editor.updateVrInput(dt, { uiBlocked: uiLocomotionBlocked() });
+  updateWristPill();
+}
 
-  for (const source of session.inputSources) {
-    const gp = source.gamepad;
-    if (!gp) continue;
-    const hand = source.handedness || 'right';
-    const axX = gp.axes[2] ?? gp.axes[0] ?? 0;
-    const axY = gp.axes[3] ?? gp.axes[1] ?? 0;
-
-    if (hand === 'left') {
-      // Smooth locomotion along head horizontal yaw
-      if (Math.hypot(axX, axY) > 0.16) {
-        const xrCam = renderer.xr.getCamera();
-        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(xrCam.quaternion);
-        forward.y = 0;
-        forward.normalize();
-        const right = new THREE.Vector3(-forward.z, 0, forward.x);
-        const speed = 4.6 * dt;
-        playerRig.position.addScaledVector(forward, -axY * speed);
-        playerRig.position.addScaledVector(right, axX * speed);
-        playerRig.position.y = terrainHeightAt(state.world, playerRig.position.x, playerRig.position.z);
-      }
-    } else {
-      // Right stick: snap turn (left/right) + push forward to teleport
-      if (Math.abs(axX) > 0.68 && snapTurnCooldown <= 0) {
-        playerRig.rotation.y -= Math.sign(axX) * (30 * DEG);
-        snapTurnCooldown = 0.32;
-      }
-      if (axY < -0.78 && teleportCooldown <= 0 && state.pointer.hitKind === 'ground') {
-        const [tx, ty, tz] = state.pointer.hitPoint;
-        playerRig.position.set(tx, ty, tz);
-        teleportCooldown = 0.48;
+/** Keep the ☰ MENU pill visually attached to the left wrist (or desktop corner). */
+const tempQ = new THREE.Quaternion();
+function updateWristPill() {
+  if (renderer.xr.isPresenting) {
+    const session = renderer.xr.getSession();
+    const left = session?.inputSources?.find((s) => s.handedness === 'left') ?? session?.inputSources?.[0];
+    if (left) {
+      const space = left.gripSpace ?? left.targetRaySpace;
+      const pose = space ? renderer.xr.getPose(left, space) : null;
+      if (pose) {
+        const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
+        const worldMatrix = new THREE.Matrix4().multiplyMatrices(playerRig.matrixWorld, m);
+        const pos = new THREE.Vector3().setFromMatrixPosition(worldMatrix);
+        tempQ.setFromRotationMatrix(worldMatrix);
+        const offset = new THREE.Vector3(0, 0.085, -0.035).applyQuaternion(tempQ);
+        wristPill.position.copy(pos).add(offset);
+        wristPill.quaternion.copy(tempQ);
+        wristPill.rotateY(Math.PI * 0.15);
+        wristPill.visible = true;
+        return;
       }
     }
-
-    // Button edge detection: button[4] = A/X (Voice), button[5] = B/Y (VR Menu)
-    gp.buttons.forEach((btn, idx) => {
-      const key = `${hand}:${idx}`;
-      const wasPressed = prevButtons.get(key) || false;
-      if (btn.pressed && !wasPressed) {
-        if (idx === 4) toggleVoiceCapture();
-        if (idx === 5) {
-          if (vrBoardMesh.visible) vrBoardMesh.visible = false;
-          else summonVrHudInFront();
-        }
-      }
-      prevButtons.set(key, btn.pressed);
-    });
   }
+  wristPill.visible = false;
 }
 
 function updateDesktopMovement(dt) {
@@ -1084,7 +1484,7 @@ function updateDesktopMovement(dt) {
 
   if (moveX || moveZ) {
     const sprint = state.keys.has('ShiftLeft') || state.keys.has('ShiftRight') ? 2.1 : 1.0;
-    const speed = 5.4 * sprint * dt;
+    const speed = Number(state.settings.moveSpeed ?? 4.5) * sprint * dt;
     const forward = new THREE.Vector3(-Math.sin(state.yaw), 0, -Math.cos(state.yaw));
     const right = new THREE.Vector3(Math.cos(state.yaw), 0, -Math.sin(state.yaw));
     playerRig.position.addScaledVector(forward, -moveZ * speed);
@@ -1139,9 +1539,17 @@ async function startXrSession(mode) {
     await current.end();
     return;
   }
-  const session = await navigator.xr.requestSession(mode, {
-    optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'layers'],
-  });
+  // `dom-overlay` lets Quest Browser show the normal HTML HUD (including the
+  // OS keyboard for text prompts) on top of the immersive scene.
+  const sessionInit = {
+    optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'layers', 'dom-overlay'],
+  };
+  if (mode === 'immersive-ar' || 'domOverlay' in (window.XRSession?.prototype ?? {})) {
+    sessionInit.domOverlay = { root: document.body };
+  }
+  const session = await navigator.xr.requestSession(mode, sessionInit);
+  state.domOverlay = Boolean(session.domOverlayState);
+  document.body.classList.toggle('xr-overlay', state.domOverlay);
   state.inVR = true;
   state.inAR = mode === 'immersive-ar';
   state.worldSignature = ''; // refresh sky/floor visibility for VR vs AR passthrough
@@ -1150,13 +1558,24 @@ async function startXrSession(mode) {
   session.addEventListener('end', () => {
     state.inVR = false;
     state.inAR = false;
+    state.domOverlay = false;
+    document.body.classList.remove('xr-overlay');
     vrBoardMesh.visible = false;
+    wristPill.visible = false;
+    state.menuGrab = null;
+    if (editor) editor.cancelDrag({ silent: true });
     state.worldSignature = '';
     rebuildWorldEnvironment(state.world);
     $('#btn-enter-vr').textContent = 'Enter VR (Quest / WebXR)';
   });
 
   await renderer.xr.setSession(session);
+  // Fixed foveated rendering keeps the Quest 3S at frame rate; harmless elsewhere.
+  try {
+    renderer.xr.setFoveation(0.6);
+  } catch {
+    /* not supported by this runtime */
+  }
   $('#btn-enter-vr').textContent = 'Exit VR';
   summonVrHudInFront();
 }
@@ -1178,22 +1597,29 @@ renderer.setAnimationLoop(() => {
 
   if (renderer.xr.isPresenting) {
     updateVrGamepads(dt);
+
+    // Ray from the active controller drives the pointer/telemetry/hover reticle
     const active = controllers[activeControllerIdx] ?? controllers[0];
     if (active) {
       tempMatrix.identity().extractRotation(active.controller.matrixWorld);
       const origin = new THREE.Vector3().setFromMatrixPosition(active.controller.matrixWorld);
       const dir = new THREE.Vector3(0, 0, -1).applyMatrix4(tempMatrix).normalize();
-      const hit = raycastFromRay(origin, dir, activeControllerIdx === 0 ? 'right' : 'left');
+      const hit = raycastFromRay(origin, dir, 'vr-controller');
       active.rayLine.scale.z = hit?.distance ?? 20;
+      updateBoardDrag(origin, dir);
+      if (!hit || hit.kind === 'none') hoverReticle.visible = false;
     }
+    editor.updatePreviewSnap();
     pushVrTelemetry();
   } else {
     updateDesktopMovement(dt);
     raycaster.setFromCamera(screenNdc, camera);
     raycastFromRay(raycaster.ray.origin, raycaster.ray.direction, 'screen');
+    editor.updatePreviewSnap();
     pushVrTelemetry();
   }
 
+  editor.refreshSelectionVisual();
   renderer.render(scene, camera);
 });
 
@@ -1262,14 +1688,128 @@ $('#vr-command-form').addEventListener('submit', (e) => {
 $('#btn-voice').addEventListener('click', toggleVoiceCapture);
 
 $('#vr-quick-chips').addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-say]');
+  const btn = e.target.closest('button');
   if (!btn) return;
-  submitSpatialPrompt(btn.dataset.say);
+  if (btn.dataset.say) submitSpatialPrompt(btn.dataset.say);
+  else if (btn.dataset.place) editor.placeObject(btn.dataset.place);
 });
 
-$('#btn-ai-drawer').addEventListener('click', () => $('#ai-drawer').classList.toggle('hidden'));
+// ---- Floating menu board controls (desktop mirrors of the in-VR board) ----
+
+function toggleBoardFromUi() {
+  editor.toggleMenu();
+  redrawVrBoard();
+}
+
+$('#btn-locomotion-drawer').addEventListener('click', () => {
+  $('#locomotion-drawer').classList.toggle('hidden');
+  $('#ai-drawer').classList.add('hidden');
+});
+$('#btn-close-locomotion').addEventListener('click', () => $('#locomotion-drawer').classList.add('hidden'));
+
+$('#btn-ai-drawer').addEventListener('click', () => {
+  $('#ai-drawer').classList.toggle('hidden');
+  $('#locomotion-drawer').classList.add('hidden');
+});
 $('#btn-close-drawer').addEventListener('click', () => $('#ai-drawer').classList.add('hidden'));
 $('#chk-tts').addEventListener('change', (e) => { state.ttsEnabled = e.target.checked; });
+
+// ---- Phase 1 settings (speeds, turning, teleport, snapping, preview) ------
+
+const outMove = $('#out-move-speed');
+const outTurn = $('#out-turn-speed');
+
+function syncSettingsUi() {
+  const st = state.settings;
+  $('#rng-move-speed').value = st.moveSpeed;
+  outMove.textContent = Number(st.moveSpeed).toFixed(1);
+  $('#sel-turn-mode').value = st.turnMode;
+  $('#rng-turn-speed').value = st.turnSpeedDeg;
+  outTurn.textContent = String(Math.round(st.turnSpeedDeg));
+  $('#sel-snap-angle').value = String(st.snapAngleDeg);
+  $('#chk-teleport').checked = Boolean(st.teleportEnabled);
+  $('#chk-snap').checked = Boolean(st.snapEnabled);
+  $('#chk-preview').checked = Boolean(st.previewPlacement);
+  $('#sel-grid-snap').value = String(st.gridSnap ?? 0);
+}
+
+$('#rng-move-speed').addEventListener('input', (e) => {
+  state.settings.moveSpeed = Number(e.target.value);
+  outMove.textContent = Number(e.target.value).toFixed(1);
+  saveVrSettings();
+});
+$('#sel-turn-mode').addEventListener('change', (e) => {
+  state.settings.turnMode = e.target.value;
+  saveVrSettings();
+});
+$('#rng-turn-speed').addEventListener('input', (e) => {
+  state.settings.turnSpeedDeg = Number(e.target.value);
+  outTurn.textContent = String(Math.round(e.target.value));
+  saveVrSettings();
+});
+$('#sel-snap-angle').addEventListener('change', (e) => {
+  state.settings.snapAngleDeg = Number(e.target.value);
+  saveVrSettings();
+});
+$('#chk-teleport').addEventListener('change', (e) => {
+  state.settings.teleportEnabled = e.target.checked;
+  saveVrSettings();
+});
+$('#chk-snap').addEventListener('change', (e) => {
+  state.settings.snapEnabled = e.target.checked;
+  saveVrSettings();
+});
+$('#chk-preview').addEventListener('change', (e) => {
+  state.settings.previewPlacement = e.target.checked;
+  saveVrSettings();
+});
+$('#sel-grid-snap').addEventListener('change', (e) => {
+  state.settings.gridSnap = Number(e.target.value);
+  saveVrSettings();
+});
+
+// ---- Phase 3 object inspector buttons + preview banner -------------------
+
+$('#vr-object-inspector').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-edit]');
+  if (!btn) return;
+  const action = btn.dataset.edit;
+  if (action === 'drag-toggle') {
+    if (state.dragging) editor.endGrab();
+    else editor.startGrab({ pointer: state.pointer.hitPoint });
+    return;
+  }
+  if (action === 'move-pin') return editor.moveSelectedTo(state.pin?.point ?? state.pointer.hitPoint);
+  if (action === 'rot-left') return editor.rotateSelected(-45);
+  if (action === 'rot-right') return editor.rotateSelected(45);
+  if (action === 'rot-90') return editor.rotateSelected(90);
+  if (action === 'scale-up') return editor.resizeSelected(1.18);
+  if (action === 'scale-down') return editor.resizeSelected(0.85);
+  if (action === 'snap') return editor.snapSelected();
+  if (action === 'duplicate') return editor.duplicateSelected();
+  if (action === 'delete') return editor.deleteSelected();
+});
+$('#btn-deselect').addEventListener('click', () => editor.deselect());
+
+$('#btn-preview-rot-left').addEventListener('click', () => editor.rotatePreview(-45));
+$('#btn-preview-rot-right').addEventListener('click', () => editor.rotatePreview(45));
+$('#btn-preview-rot-90').addEventListener('click', () => editor.rotatePreview(90));
+$('#btn-preview-confirm').addEventListener('click', () => editor.confirmPreview());
+$('#btn-preview-cancel').addEventListener('click', () => editor.clearPreview());
+
+$('#btn-recenter').addEventListener('click', () => {
+  playerRig.position.set(0, terrainHeightAt(state.world, 0, 3.5), 3.5);
+  playerRig.rotation.set(0, 0, 0);
+  state.yaw = 0;
+  state.pitch = -0.08;
+  if (vrBoardMesh.visible) placeBoard();
+  showReply('Recentred', 'You are back at the world spawn point facing forward.');
+});
+
+$('#btn-undo-top').addEventListener('click', () => editor.undo());
+$('#btn-redo-top').addEventListener('click', () => editor.redo());
+
+// ---- AI provider drawer --------------------------------------------------
 
 $('#btn-save-ai').addEventListener('click', async () => {
   const body = {
@@ -1302,6 +1842,7 @@ sse.addEventListener('change', (msg) => {
 });
 setInterval(() => syncWorld(), 2500);
 
+syncSettingsUi();
 await setupWebXrButtons();
 await populateProjectsAndAi();
 await syncWorld({ force: true });

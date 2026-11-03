@@ -57,10 +57,21 @@
           <div class="row">
             <label class="toggle"><input type="checkbox" id="gen-split" /> split into parts</label>
           </div>
+          <h2 class="panel-title">Quality preset</h2>
+          <div class="segmented" id="gen-quality-presets">
+            <button data-quality="draft" title="Fast preview: 64 detail">Draft</button>
+            <button data-quality="standard" class="active" title="Balanced: 96 detail">Standard</button>
+            <button data-quality="ultra" title="High detail: 144 + repair">Ultra</button>
+          </div>
+          <p class="hint" id="gen-quality-note">Standard: 96 detail, auto UV + texture bake. Switch to Ultra for print/VR scale.</p>
           <button class="btn accent wide" id="btn-generate">Generate mesh</button>
           <p class="hint" id="generation-note">
             Runs the local structured-prompt generator: no credits, no network. Output is real editable geometry.
           </p>
+
+          <h2 class="panel-title">Prompt library <small id="archetype-count"></small></h2>
+          <input type="text" id="archetype-search" placeholder="Search 52 archetypes: barrel, couch, pine tree..." />
+          <div class="chip-grid" id="archetype-chips"></div>
 
           <h2 class="panel-title">Image to 3D</h2>
           <div class="dropzone" id="image-dropzone">

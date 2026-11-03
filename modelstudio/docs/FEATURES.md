@@ -1,8 +1,10 @@
 # Verified features
 
-Everything below is exercised by the automated suite (`npm test` — 40 tests,
-`tests/engine.test.mjs` + `tests/cli.test.mjs` + `tests/vr-world.test.mjs`) and by manual CLI/API runs on
-this checkout. Each line names the command that proves it.
+Everything below is exercised by the automated suite (`npm test` — 69 tests across
+`tests/engine.test.mjs`, `tests/cli.test.mjs`, `tests/vr-world.test.mjs`,
+`tests/vr-controls-edit.test.mjs`, `tests/vr-client-wiring.test.mjs`,
+`tests/studio-generation.test.mjs`) and by manual CLI/API runs on this checkout.
+Each line names the command that proves it.
 
 ## Projects and persistence
 
@@ -89,3 +91,14 @@ this checkout. Each line names the command that proves it.
 | Spatial VR Pointing & Live AI World Building | `vr.point`, `vr.context`, `world.environment`, `world.spawn`, `world.scatter`, `world.prompt` | `VR pointing + "chatgpt make this a hayfield and put a green barn right there" + undo` & `OpenAI-compatible tool-calling LLM director drives VR world tools` |
 | CLI/API parity | identical input → identical output | `CLI and API produce equivalent results` |
 | OpenAPI 3.1 document | generated from the registry at runtime | `OpenAPI document covers every command` |
+
+## Text-to-3D library (Meshy-style prompt breadth)
+
+| Capability | Command | Evidence |
+| --- | --- | --- |
+| 51 parametric archetypes: furniture, props, buildings, plants, vehicles | `generate.text` | `prompt library ships a broad archetype set…`, `every archetype meshes into watertight, non-empty geometry` |
+| Multiword prompts resolve to the specific archetype ("traffic cone", "pine tree") | `generate.text` | `multiword prompts resolve to the specific archetype…` |
+| New library prompts generate real editable geometry | `generate.text` | `generate.text produces editable geometry for library prompts` |
+| Full pipeline on a library prompt: UV → bake → decimate → GLB | `mesh.uv`, `texture.bake`, `mesh.decimate`, `export.glb` | `a generated archetype runs the whole studio pipeline and exports GLB` |
+| Texture bake is fast enough to stay interactive (≈1.8 s at 512² on a 97k-tri mesh) | `texture.bake` | same test asserts `< 60 s` (previously ≈267 s) |
+| Preview renderer honours object rotation and frames the model | `preview.render` | `object.transform` + `preview.render` manual run |

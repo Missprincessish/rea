@@ -5,7 +5,7 @@ entirely on your machine: text and image → geometry, repair, remesh, decimate,
 UV, texture bake and paint, auto-rigging, skin-weight repair, procedural
 animation, GLB export, a desktop browser editor, and a **live WebXR VR world**
 (Meta Quest 3S, Quest 2/3/Pro, Pico, Vision Pro, PCVR, or desktop) — all driven
-by one 61-command registry simultaneously available over HTTP, CLI, and an
+by one 63-command registry simultaneously available over HTTP, CLI, and an
 **open MCP server** (stdio + Streamable HTTP `/mcp` + SSE) for ChatGPT, Claude,
 Cursor, Ollama, or any AI agent.
 
@@ -13,7 +13,7 @@ No Blender. No GPU. No cloud account. No credits.
 
 ```
              ┌───────────────────────────────────────────────┐
-             │  command registry (61 commands, JSON Schema)  │
+             │  command registry (63 commands, JSON Schema)  │
              └───────┬───────────┬───────────┬───────────────┘
        HTTP API ─────┘           │           └───── Open MCP (stdio + /mcp)
    (OpenAPI 3.1)                CLI                  ChatGPT / Claude / any AI
@@ -157,6 +157,24 @@ node bin/modelstudio.mjs workflow --project Demo --workflow character \
   --input '{"prompt":"female character","bakeSize":1024,"exportPath":"~/Desktop/hero.glb"}'
 ```
 
+## VR editing (select · grab · snap · duplicate)
+
+Inside the headset you can edit the world you are standing in, not just spawn into it:
+
+* **Point & select** any object with the trigger; a teal ring + gold bounding box shows the selection.
+* **Grab & move** with **Grip** (or drag with the mouse on desktop) — it live-snaps while you move.
+* **Fences snap end-to-end**, including exact **90° paddock corners**, and objects magnetically
+  align to nearby structures; an optional 0.5 m / 1.0 m **grid snap** is one dropdown away.
+* **Rotate / resize / duplicate / delete / undo / redo** from the floating board's
+  *Object Edit* tab, the on-screen inspector, the keyboard, or by voice.
+* **Ghost preview** shows the snapped result in 3D before you confirm a placement.
+* Every edit goes through the same registry commands an MCP client or ChatGPT uses, so
+  **VR, desktop, CLI and AI stay on one project revision** (SSE pushes the update instantly).
+
+All of the input math lives in [`src/core/vr-interaction.mjs`](src/core/vr-interaction.mjs) and is
+covered by `tests/vr-controls-edit.test.mjs`, so controller behaviour is regression-tested without
+a headset.
+
 ## Repository layout
 
 ```
@@ -168,7 +186,9 @@ src/vendor/                vendored MIT marching cubes
 src/server/                express API + OpenAPI generator
 src/cli/                   argument parsing, aliases, colour output
 src/mcp/                   MCP server and helpers
-web-src/                   browser editor source (three.js viewport, panels)
+src/core/vr-interaction.mjs shared VR input, locomotion, fence/structure snapping
+web-src/                   browser editor source (three.js viewport, panels, /vr client)
+web-src/vr-editor.js       VR/desktop live editing engine (select, grab, snap, ghost)
 web/                       built editor bundle (npm run build)
 tests/                     end-to-end engine + CLI tests (npm test)
 docs/                      research, install, features, limitations

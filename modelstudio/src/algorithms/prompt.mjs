@@ -305,7 +305,7 @@ const ARCHETYPES = {
 
   rock: {
     label: 'rock',
-    tags: ['rock', 'stone', 'boulder', 'terrain'],
+    tags: ['rock', 'stone', 'terrain'],
     build: (p) => {
       const rng = p.rng;
       const blobs = [];
@@ -530,7 +530,7 @@ ARCHETYPES.fence = {
 
 ARCHETYPES.well = {
   label: 'stone well',
-  tags: ['well', 'fountain', 'cistern'],
+  tags: ['well', 'cistern'],
   build: () => {
     const outer = translate(sdf.box(0.26, 0.18, 0.26, 0.12), [0, 0.18, 0]);
     const inner = translate(sdf.box(0.17, 0.18, 0.17, 0.08), [0, 0.23, 0]);
@@ -548,7 +548,7 @@ ARCHETYPES.well = {
 
 ARCHETYPES.bench = {
   label: 'wooden bench',
-  tags: ['bench', 'pew', 'couch', 'sofa'],
+  tags: ['bench', 'pew'],
   build: () => {
     const seat = translate(sdf.box(0.44, 0.028, 0.16, 0.012), [0, 0.22, 0]);
     const back = translate(sdf.box(0.44, 0.16, 0.025, 0.012), [0, 0.38, -0.14]);
@@ -602,6 +602,445 @@ ARCHETYPES.bridge = {
     };
   },
 };
+
+// ---------------------------------------------------------------------------
+// Expanded prop/architecture library
+//
+// Meshy-style text-to-3D breadth: everyday props, furniture, vehicles, plants,
+// buildings and game-ready set dressing. Everything here is a *parametric SDF*
+// built from the same primitives the rest of the studio uses, so the meshes stay
+// watertight, editable, re-meshable, riggable and exportable to GLB — no cloud
+// credits, no image AI required.
+// ---------------------------------------------------------------------------
+
+ARCHETYPES.barrel = {
+  label: 'wooden barrel',
+  tags: ['barrel', 'cask', 'keg', 'drum'],
+  build: () => {
+    const staves = {
+      type: 'barrel',
+      distance: (x, y, z) => {
+        // barrel profile: radius bulges around mid height
+        const t = Math.max(0, Math.min(1, y / 0.62));
+        const r = 0.19 + Math.sin(t * Math.PI) * 0.045;
+        const dr = Math.hypot(x, z) - r;
+        const dy = Math.abs(y - 0.31) - 0.31;
+        const outside = Math.hypot(Math.max(dr, 0), Math.max(dy, 0));
+        const inside = Math.min(Math.max(dr, dy), 0);
+        return outside + inside - 0.012;
+      },
+      bounds: () => [-0.26, 0, -0.26, 0.26, 0.62, 0.26],
+    };
+    const hollow = translate(sdf.cylinder(0.155, 0.62), [0, 0.33, 0]);
+    const hoops = [0.10, 0.31, 0.52].map((y) => {
+      const t = y / 0.62;
+      const r = 0.19 + Math.sin(t * Math.PI) * 0.045 + 0.006;
+      return translate(sdf.torus(r, 0.012), [0, y, 0]);
+    });
+    return {
+      shape: union(subtract(staves, hollow), ...hoops),
+      material: { name: 'OakBarrel', baseColorFactor: [0.44, 0.29, 0.17, 1], roughnessFactor: 0.7 },
+      parts: [{ name: 'staves', shape: staves }],
+    };
+  },
+};
+
+ARCHETYPES.crate = {
+  label: 'wooden crate',
+  tags: ['crate', 'box-crate', 'chest', 'container', 'packing'],
+  build: () => {
+    const shell = translate(sdf.box(0.27, 0.27, 0.27, 0.02), [0, 0.27, 0]);
+    const hollow = translate(sdf.box(0.23, 0.23, 0.23, 0.02), [0, 0.28, 0]);
+    const slats = [];
+    for (const y of [0.11, 0.27, 0.43]) {
+      slats.push(translate(sdf.box(0.28, 0.018, 0.28, 0.01), [0, y, 0]));
+    }
+    return {
+      shape: smoothUnion([subtract(shell, hollow), ...slats], 0.008),
+      material: { name: 'CrateWood', baseColorFactor: [0.55, 0.38, 0.22, 1], roughnessFactor: 0.82 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.ladder = {
+  label: 'ladder',
+  tags: ['ladder', 'step-ladder'],
+  build: () => {
+    const rails = [-0.18, 0.18].map((x) => sdf.capsule([x, 0, 0], [x, 1.1, 0], 0.022));
+    const rungs = [];
+    for (let i = 0; i < 7; i += 1) {
+      const y = 0.1 + i * 0.16;
+      rungs.push(sdf.capsule([-0.18, y, 0], [0.18, y, 0], 0.016));
+    }
+    return {
+      shape: smoothUnion([...rails, ...rungs], 0.008),
+      material: { name: 'LadderWood', baseColorFactor: [0.6, 0.44, 0.26, 1], roughnessFactor: 0.7 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.shelf = {
+  label: 'bookshelf',
+  tags: ['shelf', 'bookshelf', 'bookcase', 'shelving', 'rack'],
+  build: () => {
+    const sides = [-0.42, 0.42].map((x) => translate(sdf.box(0.022, 0.6, 0.14, 0.01), [x, 0.6, 0]));
+    const back = translate(sdf.box(0.44, 0.6, 0.02, 0.01), [0, 0.6, -0.13]);
+    const shelves = [0.02, 0.3, 0.58, 0.86, 1.14].map((y) => translate(sdf.box(0.44, 0.022, 0.14, 0.01), [0, y, 0]));
+    const books = [];
+    let seed = 3;
+    const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+    for (const y of [0.02, 0.3, 0.58, 0.86]) {
+      let x = -0.38;
+      while (x < 0.36) {
+        const w = 0.025 + rand() * 0.03;
+        const h = 0.16 + rand() * 0.09;
+        books.push(translate(sdf.box(w / 2, h / 2, 0.09, 0.004), [x + w / 2, y + 0.03 + h / 2, 0]));
+        x += w + 0.006;
+      }
+    }
+    return {
+      shape: smoothUnion([...sides, back, ...shelves], 0.008),
+      material: { name: 'ShelfWood', baseColorFactor: [0.42, 0.28, 0.17, 1], roughnessFactor: 0.65 },
+      parts: [{ name: 'books', shape: union(...books) }],
+    };
+  },
+};
+
+ARCHETYPES.couch = {
+  label: 'couch',
+  tags: ['couch', 'sofa', 'settee', 'loveseat'],
+  build: () => {
+    const seat = translate(sdf.box(0.62, 0.10, 0.34, 0.05), [0, 0.34, 0]);
+    const back = translate(sdf.box(0.62, 0.26, 0.10, 0.05), [0, 0.53, -0.26]);
+    const arms = [-0.62, 0.62].map((x) => translate(sdf.box(0.09, 0.16, 0.34, 0.05), [x, 0.46, 0]));
+    const feet = [[-0.52, -0.24], [0.52, -0.24], [-0.52, 0.26], [0.52, 0.26]].map(([x, z]) =>
+      sdf.capsule([x, 0.02, z], [x, 0.22, z], 0.032),
+    );
+    return {
+      shape: smoothUnion([seat, back, ...arms, ...feet], 0.035),
+      material: { name: 'CouchFabric', baseColorFactor: [0.28, 0.36, 0.44, 1], roughnessFactor: 0.92 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.bed = {
+  label: 'bed',
+  tags: ['bed', 'mattress', 'bunk'],
+  build: () => {
+    const frame = translate(sdf.box(0.48, 0.06, 0.82, 0.02), [0, 0.26, 0]);
+    const mattress = translate(sdf.box(0.45, 0.09, 0.78, 0.05), [0, 0.38, 0]);
+    const headboard = translate(sdf.box(0.48, 0.30, 0.04, 0.02), [0, 0.5, -0.8]);
+    const pillow = translate(sdf.box(0.3, 0.06, 0.16, 0.06), [0, 0.5, -0.55]);
+    const legs = [[-0.44, -0.78], [0.44, -0.78], [-0.44, 0.78], [0.44, 0.78]].map(([x, z]) =>
+      sdf.capsule([x, 0.02, z], [x, 0.24, z], 0.03),
+    );
+    return {
+      shape: smoothUnion([frame, mattress, headboard, pillow, ...legs], 0.03),
+      material: { name: 'BedLinen', baseColorFactor: [0.88, 0.88, 0.9, 1], roughnessFactor: 0.9 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.door = {
+  label: 'door',
+  tags: ['door', 'doorway', 'gate-door'],
+  build: () => {
+    const slab = translate(sdf.box(0.36, 0.62, 0.03, 0.012), [0, 0.62, 0]);
+    const panels = [
+      translate(sdf.box(0.26, 0.2, 0.01, 0.006), [0, 0.9, 0.035]),
+      translate(sdf.box(0.26, 0.2, 0.01, 0.006), [0, 0.35, 0.035]),
+    ];
+    const knob = translate(sdf.sphere(0.028), [0.26, 0.6, 0.06]);
+    return {
+      shape: union(smoothUnion([slab, ...panels], 0.008), knob),
+      material: { name: 'DoorWood', baseColorFactor: [0.4, 0.26, 0.15, 1], roughnessFactor: 0.6 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.window = {
+  label: 'window frame',
+  tags: ['window', 'window-frame', 'casement'],
+  build: () => {
+    const outer = translate(sdf.box(0.3, 0.34, 0.035, 0.012), [0, 0.34, 0]);
+    const hole = translate(sdf.box(0.26, 0.3, 0.035, 0.012), [0, 0.34, 0]);
+    const mullionV = translate(sdf.box(0.014, 0.3, 0.03, 0.005), [0, 0.34, 0.02]);
+    const mullionH = translate(sdf.box(0.26, 0.014, 0.03, 0.005), [0, 0.34, 0.02]);
+    return {
+      shape: union(subtract(outer, hole), mullionV, mullionH),
+      material: { name: 'WindowFrame', baseColorFactor: [0.92, 0.92, 0.94, 1], roughnessFactor: 0.4 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.stairs = {
+  label: 'stairs',
+  tags: ['stairs', 'staircase', 'steps', 'stairway'],
+  build: () => {
+    const steps = [];
+    for (let i = 0; i < 8; i += 1) {
+      steps.push(translate(sdf.box(0.30, 0.045, 0.07, 0.008), [0, 0.045 + i * 0.09, -0.55 + i * 0.15]));
+    }
+    const stringers = [-0.31, 0.31].map((x) => sdf.capsule([x, 0.02, 0.62], [x, 0.76, -0.55], 0.03));
+    return {
+      shape: smoothUnion([...steps, ...stringers], 0.008),
+      material: { name: 'StairStone', baseColorFactor: [0.6, 0.58, 0.55, 1], roughnessFactor: 0.85 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.house = ARCHETYPES.house ?? {
+  label: 'house',
+  tags: ['house', 'cottage', 'home', 'cabin'],
+  build: () => {
+    const walls = translate(sdf.box(0.5, 0.35, 0.42, 0.02), [0, 0.35, 0]);
+    const roof = translate(sdf.cone(0.78, 0.34), [0, 0.84, 0]);
+    const interior = translate(sdf.box(0.44, 0.31, 0.36, 0.02), [0, 0.35, 0]);
+    const door = translate(sdf.box(0.09, 0.16, 0.1, 0.01), [0, 0.16, 0.42]);
+    const windows = [
+      translate(sdf.box(0.08, 0.08, 0.1, 0.008), [-0.3, 0.45, 0.42]),
+      translate(sdf.box(0.08, 0.08, 0.1, 0.008), [0.3, 0.45, 0.42]),
+    ];
+    const chimney = translate(sdf.box(0.06, 0.16, 0.06, 0.008), [0.28, 0.95, -0.14]);
+    return {
+      shape: union(subtract(smoothUnion([walls, roof], 0.02), interior, door, ...windows), chimney),
+      material: { name: 'HousePlaster', baseColorFactor: [0.88, 0.85, 0.78, 1], roughnessFactor: 0.8 },
+      parts: [{ name: 'roof', shape: roof }],
+    };
+  },
+};
+
+ARCHETYPES.fountain = {
+  label: 'fountain',
+  tags: ['fountain', 'water-feature', 'pond'],
+  build: () => {
+    const basin = translate(sdf.box(0.42, 0.1, 0.42, 0.14), [0, 0.1, 0]);
+    const basinHollow = translate(sdf.box(0.32, 0.1, 0.32, 0.1), [0, 0.13, 0]);
+    const column = limb([0, 0.12, 0], [0, 0.5, 0], 0.075, 0.05);
+    const bowl = translate(sdf.cone(0.28, 0.09), [0, 0.56, 0]);
+    const water = translate(sdf.ellipsoid(0.3, 0.02, 0.3), [0, 0.19, 0]);
+    return {
+      shape: smoothUnion([subtract(basin, basinHollow), column, bowl], 0.02),
+      material: { name: 'FountainStone', baseColorFactor: [0.7, 0.7, 0.72, 1], roughnessFactor: 0.6 },
+      parts: [{ name: 'water', shape: water }],
+    };
+  },
+};
+
+ARCHETYPES.planter = {
+  label: 'planter',
+  tags: ['planter', 'flowerpot', 'flower-pot', 'pot-plant'],
+  build: () => {
+    const pot = translate(sdf.cone(0.17, -0.26), [0, 0.14, 0]);
+    const hollow = translate(sdf.cone(0.14, -0.22), [0, 0.18, 0]);
+    const soil = translate(sdf.cylinder(0.135, 0.03), [0, 0.25, 0]);
+    const stems = [];
+    const leaves = [];
+    let seed = 11;
+    const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+    for (let i = 0; i < 5; i += 1) {
+      const a = (i / 5) * Math.PI * 2;
+      const tip = [Math.cos(a) * 0.12, 0.5 + rand() * 0.16, Math.sin(a) * 0.12];
+      stems.push(sdf.capsule([0, 0.26, 0], tip, 0.012));
+      leaves.push(translate(sdf.ellipsoid(0.06, 0.012, 0.09), tip));
+    }
+    return {
+      shape: union(subtract(pot, hollow), soil, ...stems, ...leaves),
+      material: { name: 'Terracotta', baseColorFactor: [0.68, 0.36, 0.24, 1], roughnessFactor: 0.85 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.pine = {
+  label: 'pine tree',
+  tags: ['pine', 'pine-tree', 'conifer', 'fir', 'spruce'],
+  build: () => {
+    // Trunk + four overlapping, taller-than-wide needle tiers: reads as a
+    // conifer from every angle (flat wide cones looked like umbrellas).
+    const trunk = limb([0, 0, 0], [0, 0.66, 0], 0.058, 0.03);
+    const tierSpecs = [
+      { y: 0.24, r: 0.36, h: 0.62 },
+      { y: 0.52, r: 0.30, h: 0.58 },
+      { y: 0.80, r: 0.23, h: 0.52 },
+      { y: 1.05, r: 0.15, h: 0.44 },
+    ];
+    const tiers = tierSpecs.map(({ y, r, h }) => translate(sdf.cone(h, r), [0, y + h / 2, 0]));
+    return {
+      shape: smoothUnion([trunk, ...tiers], 0.03),
+      material: { name: 'PineNeedles', baseColorFactor: [0.18, 0.34, 0.2, 1], roughnessFactor: 0.9 },
+      parts: [{ name: 'trunk', shape: trunk }, { name: 'canopy', shape: smoothUnion(tiers, 0.02) }],
+    };
+  },
+};
+
+ARCHETYPES.bush = {
+  label: 'bush',
+  tags: ['bush', 'shrub', 'hedge', 'foliage'],
+  build: () => {
+    const blobs = [
+      translate(sdf.sphere(0.26), [0, 0.24, 0]),
+      translate(sdf.sphere(0.19), [0.2, 0.32, 0.1]),
+      translate(sdf.sphere(0.17), [-0.19, 0.3, -0.08]),
+      translate(sdf.sphere(0.15), [0.05, 0.42, -0.16]),
+    ];
+    return {
+      shape: smoothUnion(blobs, 0.09),
+      material: { name: 'BushLeaves', baseColorFactor: [0.24, 0.42, 0.22, 1], roughnessFactor: 0.95 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.rockBig = {
+  label: 'boulder',
+  tags: ['boulder', 'big rock', 'large rock', 'cliff rock'],
+  build: () => {
+    const base = translate(sdf.ellipsoid(0.42, 0.3, 0.36), [0, 0.26, 0]);
+    const chipA = translate(sdf.sphere(0.2), [0.22, 0.42, 0.12]);
+    const chipB = translate(sdf.sphere(0.16), [-0.24, 0.36, -0.14]);
+    const cut = translate(sdf.ellipsoid(0.3, 0.26, 0.3), [0.12, 0.52, 0.22]);
+    return {
+      shape: subtract(smoothUnion([base, chipA, chipB], 0.05), cut),
+      material: { name: 'BoulderRock', baseColorFactor: [0.46, 0.46, 0.48, 1], roughnessFactor: 0.95 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.streetlamp = {
+  label: 'street lamp',
+  tags: ['streetlamp', 'street-lamp', 'street light', 'street-light', 'lamppost', 'lamp-post', 'lamp post'],
+  build: () => {
+    const base = translate(sdf.cylinder(0.13, 0.07), [0, 0.035, 0]);
+    const pole = limb([0, 0.07, 0], [0, 1.7, 0], 0.042, 0.03);
+    const arm = sdf.capsule([0, 1.68, 0], [0.28, 1.74, 0], 0.026);
+    const shade = translate(sdf.cone(-0.14, 0.17), [0.30, 1.66, 0]); // flared downwards
+    const bulb = translate(sdf.sphere(0.05), [0.30, 1.60, 0]);
+    return {
+      shape: union(base, pole, arm, shade, bulb),
+      material: { name: 'LampIron', baseColorFactor: [0.2, 0.21, 0.23, 1], metallicFactor: 0.7, roughnessFactor: 0.4 },
+      parts: [{ name: 'bulb', shape: bulb }],
+    };
+  },
+};
+
+ARCHETYPES.trafficCone = {
+  label: 'traffic cone',
+  tags: ['traffic-cone', 'traffic cone', 'cone-marker', 'pylon'],
+  build: () => {
+    const base = translate(sdf.box(0.13, 0.012, 0.13, 0.01), [0, 0.012, 0]);
+    const cone = translate(sdf.cone(0.12, -0.34), [0, 0.24, 0]);
+    const band = translate(sdf.cylinder(0.082, 0.04), [0, 0.18, 0]);
+    return {
+      shape: union(base, smoothUnion([cone, band], 0.004)),
+      material: { name: 'ConeOrange', baseColorFactor: [0.92, 0.35, 0.08, 1], roughnessFactor: 0.7 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.boat = {
+  label: 'rowboat',
+  tags: ['boat', 'rowboat', 'canoe', 'dinghy', 'ship'],
+  build: () => {
+    const hull = {
+      type: 'hull',
+      distance: (x, y, z) => {
+        const t = (z + 0.7) / 1.4; // 0 bow .. 1 stern
+        const width = 0.20 * Math.sin(Math.PI * Math.min(1, Math.max(0, t))) + 0.05;
+        const dx = Math.abs(x) - width;
+        const dy = Math.abs(y - 0.16) - 0.16;
+        const dz = Math.abs(z) - 0.7;
+        return Math.max(dx, dy, dz) - 0.02;
+      },
+      bounds: () => [-0.28, 0, -0.72, 0.28, 0.34, 0.72],
+    };
+    const interior = translate(sdf.box(0.16, 0.1, 0.58, 0.02), [0, 0.24, 0]);
+    const bench = translate(sdf.box(0.16, 0.02, 0.035, 0.008), [0, 0.24, 0.1]);
+    return {
+      shape: subtract(hull, interior, bench),
+      material: { name: 'BoatWood', baseColorFactor: [0.5, 0.36, 0.22, 1], roughnessFactor: 0.7 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.cart = {
+  label: 'wooden cart',
+  tags: ['cart', 'wagon', 'wheelbarrow', 'handcart'],
+  build: () => {
+    const bed = translate(sdf.box(0.32, 0.06, 0.5, 0.012), [0, 0.36, 0]);
+    const walls = [
+      translate(sdf.box(0.32, 0.12, 0.02, 0.01), [0, 0.42, 0.5]),
+      translate(sdf.box(0.32, 0.12, 0.02, 0.01), [0, 0.42, -0.5]),
+    ];
+    const wheels = [-0.34, 0.34].map((z) => translate(sdf.torus(0.22, 0.03), [0, 0.22, z]));
+    const axle = sdf.capsule([0, 0.22, -0.34], [0, 0.22, 0.34], 0.022);
+    const handles = [-0.16, 0.16].map((x) => sdf.capsule([x, 0.4, 0.5], [x, 0.55, 0.85], 0.018));
+    return {
+      shape: smoothUnion([bed, ...walls, ...wheels, axle, ...handles], 0.02),
+      material: { name: 'CartWood', baseColorFactor: [0.52, 0.35, 0.2, 1], roughnessFactor: 0.75 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.armchair = {
+  label: 'armchair',
+  tags: ['armchair', 'reading-chair'],
+  build: () => {
+    const seat = translate(sdf.box(0.34, 0.09, 0.3, 0.05), [0, 0.38, 0]);
+    const back = translate(sdf.box(0.34, 0.3, 0.09, 0.05), [0, 0.62, -0.26]);
+    const arms = [-0.38, 0.38].map((x) => translate(sdf.box(0.07, 0.14, 0.3, 0.04), [x, 0.5, 0]));
+    const legs = [[-0.28, -0.22], [0.28, -0.22], [-0.28, 0.24], [0.28, 0.24]].map(([x, z]) =>
+      sdf.capsule([x, 0.02, z], [x, 0.3, z], 0.028),
+    );
+    return {
+      shape: smoothUnion([seat, back, ...arms, ...legs], 0.04),
+      material: { name: 'ArmchairFabric', baseColorFactor: [0.5, 0.24, 0.22, 1], roughnessFactor: 0.9 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.signpost = {
+  label: 'signpost',
+  tags: ['signpost', 'sign', 'sign-board', 'billboard'],
+  build: () => {
+    const post = sdf.capsule([0, 0, 0], [0, 0.9, 0], 0.03);
+    const board = translate(sdf.box(0.28, 0.11, 0.014, 0.01), [0, 0.78, 0]);
+    const brace = translate(sdf.box(0.02, 0.02, 0.03, 0.006), [0, 0.68, 0]);
+    return {
+      shape: union(post, board, brace),
+      material: { name: 'SignBoard', baseColorFactor: [0.86, 0.82, 0.7, 1], roughnessFactor: 0.7 },
+      parts: [],
+    };
+  },
+};
+
+ARCHETYPES.gateArch = {
+  label: 'gate arch',
+  tags: ['gate-arch', 'archway', 'trellis'],
+  build: () => {
+    const posts = [-0.44, 0.44].map((x) => translate(sdf.box(0.045, 0.6, 0.045, 0.012), [x, 0.6, 0]));
+    const arch = translate(sdf.torus(0.44, 0.04), [0, 1.2, 0]);
+    const top = translate(sdf.box(0.48, 0.035, 0.045, 0.012), [0, 1.2, 0]);
+    return {
+      shape: union(...posts, subtract(arch, translate(sdf.box(0.5, 0.3, 0.2, 0.01), [0, 1.05, 0])), top),
+      material: { name: 'TrellisWood', baseColorFactor: [0.58, 0.42, 0.26, 1], roughnessFactor: 0.8 },
+      parts: [],
+    };
+  },
+};
+
 
 
 // ---------------------------------------------------------------------------
@@ -804,10 +1243,15 @@ export function matchArchetype(prompt) {
   for (const [key, archetype] of Object.entries(ARCHETYPES)) {
     let score = 0;
     for (const tag of archetype.tags) {
-      const exact = joined.includes(` ${tag} `);
-      const plural = !exact && joined.includes(` ${tag}s `);
+      // Hyphenated tags ("traffic-cone", "gate-arch") are matched as phrases so
+      // multiword prompts like "traffic cone" reach the specific archetype.
+      const phrase = tag.replace(/-/g, ' ');
+      const exact = joined.includes(` ${phrase} `);
+      const plural = !exact && joined.includes(` ${phrase}s `);
       if (exact || plural) {
         if (MATERIAL_ADJ_TAGS.has(tag)) score += 1.5;
+        // Multiword phrases are much more specific than single tokens.
+        else if (phrase.includes(' ')) score += 3.4;
         else score += exact && tag.length >= 5 ? 3 : 2.2;
       }
     }

@@ -11,9 +11,11 @@
 // cleanly to `local`.
 
 import { matchArchetype } from '../algorithms/prompt.mjs';
+import { boundingBox } from './geometry.mjs';
 import { fail } from './util.mjs';
-import { buildVrContext, resolveSpatialLocation, updateVrState } from './vr-state.mjs';
-import { BIOMES, TIME_PRESETS } from './world.mjs';
+import { computeFenceSnap, computeObjectFootprint, extractYawDeg } from './vr-interaction.mjs';
+import { buildVrContext, getVrState, resolveSpatialLocation, updateVrState } from './vr-state.mjs';
+import { BIOMES, TIME_PRESETS, normalizeWorld, terrainHeightAt } from './world.mjs';
 
 const runtimeConfig = {
   apiKey: process.env.MODELSTUDIO_AI_KEY ?? process.env.OPENAI_API_KEY ?? '',
@@ -109,16 +111,21 @@ export function openAiToolSchemas() {
       type: 'function',
       function: {
         name: 'modify_object',
-        description: 'Move, scale, rotate, recolor, or delete an existing object (use selector="targeted" when the user says "that" or "this" while pointing at an object).',
+        description:
+          'Move (to a spot or closer/further/left/right), scale, rotate, snap/align, duplicate, recolor, or delete an existing object (use selector="targeted" when the user says "that" or "this" while pointing at an object).',
         parameters: {
           type: 'object',
           required: ['action'],
           properties: {
-            selector: { type: 'string', description: '"targeted" (object under VR ray) or object name' },
-            action: { type: 'string', enum: ['move', 'scale', 'rotate', 'color', 'delete'] },
-            at: { type: 'string', description: 'Destination for move, e.g. "pointer"' },
+            selector: { type: 'string', description: '"targeted" (object under VR ray) or object name/type such as "fence" or "windmill"' },
+            action: { type: 'string', enum: ['move', 'scale', 'rotate', 'snap', 'duplicate', 'color', 'delete'] },
+            at: { type: 'string', description: 'Destination for move, e.g. "pointer", "in-front", "left", "right", "behind"' },
+            direction: { type: 'string', enum: ['closer', 'further', 'left', 'right', 'forward', 'back'], description: 'Relative nudge direction when moving relative to the VR user' },
+            distanceMeters: { type: 'number', description: 'Distance in meters for relative move' },
             factor: { type: 'number', description: 'Scale multiplier for scale, e.g. 1.5 or 0.6' },
-            yawDelta: { type: 'number', description: 'Yaw rotation delta in degrees' },
+            yawDelta: { type: 'number', description: 'Yaw rotation in degrees (relative turn amount, or the absolute yaw when mode="absolute")' },
+            mode: { type: 'string', enum: ['relative', 'absolute'], description: 'Whether yawDelta is relative to the current yaw (default) or an absolute world yaw' },
+            facePlayer: { type: 'boolean', description: 'Rotate object front toward the VR user' },
             color: { type: 'string', description: 'Color name or #hex for color action, e.g. "green", "red", "#2e7d32"' },
           },
         },
@@ -143,6 +150,14 @@ export function openAiToolSchemas() {
       function: {
         name: 'undo_last',
         description: 'Undo the previous world or object change.',
+        parameters: { type: 'object', properties: {} },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'redo_last',
+        description: 'Redo the previously undone world or object change.',
         parameters: { type: 'object', properties: {} },
       },
     },
@@ -294,6 +309,57 @@ async function runOpenAiWorldAgent({ project, runCommand, instruction, apiKey, b
   };
 }
 
+function cleanSelectorText(raw) {
+  const s = String(raw ?? 'targeted').trim();
+  if (!s || /^(?:that|this|it|that\s+one|this\s+one|that\s+object|this\s+object)$/i.test(s)) {
+    return 'targeted';
+  }
+  return s.replace(/^(?:that|this|the|my|our|a|an)\s+/i, '').trim() || 'targeted';
+}
+
+function findTargetObjectInProject(live, rawSelector) {
+  const cleaned = cleanSelectorText(rawSelector);
+  const ctx = buildVrContext(live);
+  const all = Object.values(live.data.objects);
+  if (!all.length) return null;
+
+  if (cleaned === 'targeted') {
+    const tId = ctx.vr.targetedObject?.id;
+    if (tId && live.data.objects[tId]) return live.data.objects[tId];
+    return all[all.length - 1];
+  }
+
+  try {
+    const exact = live.resolveObjects(cleaned)[0];
+    if (exact) return exact;
+  } catch {
+    // `resolveObjects` throws for fuzzy selectors like "fence" — fall through to
+    // substring matching against names and archetypes.
+  }
+
+  const lower = cleaned.toLowerCase();
+  const matches = all.filter(
+    (o) => o.name.toLowerCase().includes(lower) || (o.metadata?.archetype ?? '').toLowerCase().includes(lower),
+  );
+  if (!matches.length) {
+    // Fallback to VR targeted object if present
+    const tId = ctx.vr.targetedObject?.id;
+    return tId && live.data.objects[tId] ? live.data.objects[tId] : null;
+  }
+  const tId = ctx.vr.targetedObject?.id;
+  const pointedMatch = matches.find((o) => o.id === tId);
+  if (pointedMatch) return pointedMatch;
+
+  const vr = getVrState(live);
+  const refPt = vr.pin?.point ?? vr.pointer?.hitPoint ?? vr.head?.position ?? [0, 0, 0];
+  matches.sort((a, b) => {
+    const pa = a.transform?.translation ?? [0, 0, 0];
+    const pb = b.transform?.translation ?? [0, 0, 0];
+    return Math.hypot(pa[0] - refPt[0], pa[2] - refPt[2]) - Math.hypot(pb[0] - refPt[0], pb[2] - refPt[2]);
+  });
+  return matches[0];
+}
+
 async function dispatchAgentTool({ projectName, runCommand, name, args }) {
   const { Project } = await import('./project.mjs');
   switch (name) {
@@ -347,35 +413,160 @@ async function dispatchAgentTool({ projectName, runCommand, name, args }) {
     }
     case 'modify_object': {
       const live = await Project.open(projectName);
-      const ctx = buildVrContext(live);
-      const targetName =
-        !args.selector || args.selector === 'targeted' || args.selector === 'that'
-          ? ctx.vr.targetedObject?.name ?? Object.values(live.data.objects).slice(-1)[0]?.name
-          : args.selector;
-      if (!targetName) {
+      const targetObj = findTargetObjectInProject(live, args.selector);
+      if (!targetObj) {
         return { ok: false, error: { code: 'no_target_object', message: 'Point at an object first or name the object to modify.' } };
       }
+      const targetName = targetObj.name;
+      const world = normalizeWorld(live.data.world);
+      const vr = getVrState(live);
+
       if (args.action === 'delete') {
-        const res = await runCommand('object.delete', { project: projectName, object: targetName });
+        const res = await runCommand('object.delete', { project: projectName, object: targetObj.id });
         return { ok: res.ok, summary: res.ok ? `Deleted ${targetName}` : res.error?.message, data: res.data, error: res.error };
       }
+      if (args.action === 'duplicate') {
+        const res = await runCommand('world.duplicate', { project: projectName, object: targetObj.id, snapEndToEnd: true });
+        const dup = res.data?.result;
+        return {
+          ok: res.ok,
+          summary: res.ok ? `Duplicated ${targetName} as ${dup?.name ?? 'copy'}` : res.error?.message,
+          data: res.data,
+          error: res.error,
+        };
+      }
+      if (args.action === 'snap') {
+        const res = await runCommand('world.snap', { project: projectName, object: targetObj.id, mode: args.mode ?? 'auto' });
+        const info = res.data?.result;
+        return {
+          ok: res.ok,
+          summary: res.ok
+            ? (info?.snapped ? `Snapped ${targetName} (${info.kind}) to ${info.targetName ?? 'grid'}` : `${targetName} is already positioned`)
+            : res.error?.message,
+          data: res.data,
+          error: res.error,
+        };
+      }
       if (args.action === 'move') {
-        const loc = resolveSpatialLocation(live, args.at ?? 'pointer');
-        const res = await runCommand('object.transform', { project: projectName, object: targetName, translation: loc.position });
-        return { ok: res.ok, summary: res.ok ? `Moved ${targetName} to (${loc.position.join(', ')})` : res.error?.message, data: res.data, error: res.error };
+        let nextPos;
+        let nextYaw = extractYawDeg(targetObj.transform?.rotation);
+        const curPos = [...(targetObj.transform?.translation ?? [0, 0, 0])];
+
+        if (args.direction) {
+          const headPos = vr.head?.position ?? [0, 1.68, 3.5];
+          const headFwd = vr.head?.forward ?? [0, 0, -1];
+          let fx = headFwd[0] || 0;
+          let fz = headFwd[2] || 0;
+          const fl = Math.hypot(fx, fz) || 1;
+          fx /= fl;
+          fz /= fl;
+          const rx = -fz;
+          const rz = fx;
+
+          const toPlayerX = headPos[0] - curPos[0];
+          const toPlayerZ = headPos[2] - curPos[2];
+          const distToPlayer = Math.hypot(toPlayerX, toPlayerZ);
+          const uPx = distToPlayer > 1e-3 ? toPlayerX / distToPlayer : -fx;
+          const uPz = distToPlayer > 1e-3 ? toPlayerZ / distToPlayer : -fz;
+
+          if (args.direction === 'closer') {
+            const step = args.distanceMeters ?? Math.max(1.2, Math.min(5.0, distToPlayer * 0.38));
+            const clampedStep = Math.min(step, Math.max(0, distToPlayer - 1.4));
+            nextPos = [curPos[0] + uPx * clampedStep, curPos[1], curPos[2] + uPz * clampedStep];
+          } else if (args.direction === 'further') {
+            const step = args.distanceMeters ?? 2.8;
+            nextPos = [curPos[0] - uPx * step, curPos[1], curPos[2] - uPz * step];
+          } else if (args.direction === 'left') {
+            const step = args.distanceMeters ?? 2.0;
+            nextPos = [curPos[0] - rx * step, curPos[1], curPos[2] - rz * step];
+          } else if (args.direction === 'right') {
+            const step = args.distanceMeters ?? 2.0;
+            nextPos = [curPos[0] + rx * step, curPos[1], curPos[2] + rz * step];
+          } else if (args.direction === 'forward') {
+            const step = args.distanceMeters ?? 2.2;
+            nextPos = [curPos[0] + fx * step, curPos[1], curPos[2] + fz * step];
+          } else {
+            const step = args.distanceMeters ?? 2.2;
+            nextPos = [curPos[0] - fx * step, curPos[1], curPos[2] - fz * step];
+          }
+          nextPos[1] = Number(terrainHeightAt(world, nextPos[0], nextPos[2]).toFixed(3));
+        } else {
+          const loc = resolveSpatialLocation(live, args.at ?? 'pointer');
+          nextPos = [...loc.position];
+        }
+
+        // Auto-snap fence end-to-end if moved near another fence!
+        const rawSize = boundingBox(live.getGeometry(targetObj)).size;
+        const movingFp = computeObjectFootprint(
+          { ...targetObj, transform: { ...targetObj.transform, translation: nextPos, rotation: [0, nextYaw, 0] } },
+          rawSize,
+        );
+        if (movingFp.archetype === 'fence') {
+          const others = Object.values(live.data.objects)
+            .filter((o) => o.id !== targetObj.id)
+            .map((o) => computeObjectFootprint(o, boundingBox(live.getGeometry(o)).size));
+          const fs = computeFenceSnap(movingFp, others, {
+            terrainHeightFn: (x, z) => terrainHeightAt(world, x, z),
+          });
+          if (fs.snapped) {
+            nextPos = fs.position;
+            nextYaw = fs.yawDeg;
+          }
+        }
+
+        nextPos = nextPos.map((n) => Number(n.toFixed(3)));
+        const res = await runCommand('object.transform', {
+          project: projectName,
+          object: targetObj.id,
+          translation: nextPos,
+          rotation: [0, Number(nextYaw.toFixed(2)), 0],
+        });
+        return {
+          ok: res.ok,
+          summary: res.ok ? `Moved ${targetName} to (${nextPos.map((n) => n.toFixed(1)).join(', ')})` : res.error?.message,
+          data: res.data,
+          error: res.error,
+        };
       }
       if (args.action === 'scale') {
-        const obj = live.resolveObjects(targetName)[0];
-        const cur = obj?.transform?.scale ?? [1, 1, 1];
-        const f = Number(args.factor ?? 1.4);
-        const res = await runCommand('object.transform', { project: projectName, object: targetName, scale: cur.map((v) => Number((v * f).toFixed(4))) });
+        const cur = targetObj.transform?.scale ?? [1, 1, 1];
+        const f = Number(args.factor ?? 1.35);
+        const res = await runCommand('object.transform', {
+          project: projectName,
+          object: targetObj.id,
+          scale: cur.map((v) => Number((v * f).toFixed(4))),
+        });
         return { ok: res.ok, summary: res.ok ? `Scaled ${targetName} by ${f}x` : res.error?.message, data: res.data, error: res.error };
       }
       if (args.action === 'rotate') {
-        const obj = live.resolveObjects(targetName)[0];
-        const cur = obj?.transform?.rotation ?? [0, 0, 0];
-        const res = await runCommand('object.transform', { project: projectName, object: targetName, rotation: [cur[0], cur[1] + Number(args.yawDelta ?? 45), cur[2]] });
-        return { ok: res.ok, summary: res.ok ? `Rotated ${targetName}` : res.error?.message, data: res.data, error: res.error };
+        // "rotate X 90 degrees" / "rotate X 90°" = absolute yaw; "turn X around" /
+        // "rotate X" = relative delta from the object's current yaw.
+        const curYaw = extractYawDeg(targetObj.transform?.rotation);
+        const delta = Number(args.yawDelta ?? 45);
+        const absolute = args.absoluteYaw !== undefined
+          ? Number(args.absoluteYaw)
+          : args.mode === 'absolute' ? delta : null;
+        let nextYaw;
+        if (args.facePlayer) {
+          const headPos = vr.head?.position ?? [0, 1.68, 3.5];
+          const curPos = targetObj.transform?.translation ?? [0, 0, 0];
+          nextYaw = (Math.atan2(headPos[0] - curPos[0], headPos[2] - curPos[2]) * 180) / Math.PI;
+        } else if (absolute !== null) {
+          nextYaw = absolute;
+        } else {
+          nextYaw = curYaw + delta;
+        }
+        const res = await runCommand('object.transform', {
+          project: projectName,
+          object: targetObj.id,
+          rotation: [0, Number(nextYaw.toFixed(2)), 0],
+        });
+        return {
+          ok: res.ok,
+          summary: res.ok ? `Rotated ${targetName} to ${Number(nextYaw.toFixed(1))}°` : res.error?.message,
+          data: res.data,
+          error: res.error,
+        };
       }
       if (args.action === 'color') {
         const rgb = parseColorSpec(args.color);
@@ -384,7 +575,7 @@ async function dispatchAgentTool({ projectName, runCommand, name, args }) {
           project: projectName,
           name: `${targetName}_${args.color}`,
           baseColorFactor: [...rgb, 1],
-          assignTo: targetName,
+          assignTo: targetObj.id,
         });
         return { ok: res.ok, summary: res.ok ? `Recolored ${targetName} to ${args.color}` : res.error?.message, data: res.data, error: res.error };
       }
@@ -401,6 +592,10 @@ async function dispatchAgentTool({ projectName, runCommand, name, args }) {
     case 'undo_last': {
       const res = await runCommand('project.undo', { project: projectName });
       return { ok: res.ok, summary: res.ok ? 'Undid last change' : res.error?.message, data: res.data, error: res.error };
+    }
+    case 'redo_last': {
+      const res = await runCommand('project.redo', { project: projectName });
+      return { ok: res.ok, summary: res.ok ? 'Redid change' : res.error?.message, data: res.data, error: res.error };
     }
     default:
       return { ok: false, error: { code: 'unknown_tool', message: `Unknown tool "${name}"` } };
@@ -568,10 +763,15 @@ async function runLocalWorldPlanner({ project, runCommand, instruction }) {
     if (!clause) continue;
     const lower = clause.toLowerCase();
 
-    // 1. Undo
+    // 1. Undo / Redo
     if (/^(?:please\s+)?undo\b/i.test(lower)) {
       const outcome = await dispatchAgentTool({ projectName: project.data.name, runCommand, name: 'undo_last', args: {} });
       actions.push({ clause, tool: 'undo_last', ok: outcome.ok, summary: outcome.summary, data: outcome.data, error: outcome.error });
+      continue;
+    }
+    if (/^(?:please\s+)?redo\b/i.test(lower)) {
+      const outcome = await dispatchAgentTool({ projectName: project.data.name, runCommand, name: 'redo_last', args: {} });
+      actions.push({ clause, tool: 'redo_last', ok: outcome.ok, summary: outcome.summary, data: outcome.data, error: outcome.error });
       continue;
     }
 
@@ -631,11 +831,65 @@ async function runLocalWorldPlanner({ project, runCommand, instruction }) {
       continue;
     }
 
-    // 5. Move existing object ("move that right there", "move the barn over here")
-    const moveMatch = lower.match(/^(?:move|relocate|shift|bring)\s+(?:the\s+)?(.+?)\s+(?:to\s+)?(right\s+there|over\s+there|there|here|right\s+here|in\s+front\s+of\s+me|to\s+my\s+left|to\s+my\s+right|behind\s+me|where\s+i(?:'m|\s+am)?\s+pointing)$/i);
+    // 4b. Duplicate / Extend existing object ("duplicate that fence", "copy this windmill", "extend that fence")
+    const dupMatch = lower.match(/^(?:duplicate|copy|clone|extend)\s+(.+)$/i);
+    if (dupMatch) {
+      const selector = cleanSelectorText(stripLocationPhrases(dupMatch[1]));
+      const outcome = await dispatchAgentTool({
+        projectName: project.data.name,
+        runCommand,
+        name: 'modify_object',
+        args: { selector, action: 'duplicate' },
+      });
+      actions.push({ clause, tool: 'modify_object', ok: outcome.ok, summary: outcome.summary, data: outcome.data, error: outcome.error });
+      continue;
+    }
+
+    // 4c. Snap / Connect / Align existing object ("snap that fence", "connect the fences", "align this windmill to the barn")
+    const snapMatch = lower.match(/^(?:snap|connect|join|attach|align)\s+(.+?)(?:\s+(?:to|with|end[- ]to[- ]end(?:\s+with)?)\s+(.+))?$/i);
+    if (snapMatch) {
+      let rawSel = snapMatch[1].trim();
+      if (/^(?:the\s+)?fences$/i.test(rawSel)) rawSel = 'fence';
+      const selector = cleanSelectorText(rawSel);
+      const mode = /^align\b/i.test(lower) ? 'align' : 'auto';
+      const outcome = await dispatchAgentTool({
+        projectName: project.data.name,
+        runCommand,
+        name: 'modify_object',
+        args: { selector, action: 'snap', mode },
+      });
+      actions.push({ clause, tool: 'modify_object', ok: outcome.ok, summary: outcome.summary, data: outcome.data, error: outcome.error });
+      continue;
+    }
+
+    // 5a. Move existing object relative to player ("move that fence closer", "push this windmill further away", "move that 2m left")
+    const relMoveMatch = lower.match(
+      /^(?:move|bring|pull|push|slide|shift|nudge)\s+(.+?)\s+(?:(\d+(?:\.\d+)?)\s*(?:m|meters?|ft|feet)?\s*)?(closer(?:\s+to\s+me)?|nearer(?:\s+to\s+me)?|further(?:\s+away)?|farther(?:\s+away)?|away(?:\s+from\s+me)?|(?:to\s+the\s+)?left|(?:to\s+the\s+)?right|forward|back(?:ward)?s?)$/i,
+    );
+    if (relMoveMatch) {
+      const selector = cleanSelectorText(relMoveMatch[1]);
+      const distNum = relMoveMatch[2] ? Number(relMoveMatch[2]) : undefined;
+      const dirWord = relMoveMatch[3].toLowerCase();
+      let direction = 'closer';
+      if (/^(?:further|farther|away)/.test(dirWord)) direction = 'further';
+      else if (/left$/.test(dirWord)) direction = 'left';
+      else if (/right$/.test(dirWord)) direction = 'right';
+      else if (/^forward/.test(dirWord)) direction = 'forward';
+      else if (/^back/.test(dirWord)) direction = 'back';
+      const outcome = await dispatchAgentTool({
+        projectName: project.data.name,
+        runCommand,
+        name: 'modify_object',
+        args: { selector, action: 'move', direction, ...(distNum ? { distanceMeters: distNum } : {}) },
+      });
+      actions.push({ clause, tool: 'modify_object', ok: outcome.ok, summary: outcome.summary, data: outcome.data, error: outcome.error });
+      continue;
+    }
+
+    // 5b. Move existing object to spatial target ("move that right there", "move that fence over here")
+    const moveMatch = lower.match(/^(?:move|relocate|shift|bring|put)\s+((?:that|this|the|my)\s+.+?|that|this|it)\s+(?:to\s+)?(right\s+there|over\s+there|there|here|right\s+here|in\s+front\s+of\s+me|to\s+my\s+left|to\s+my\s+right|behind\s+me|where\s+i(?:'m|\s+am)?\s+pointing)$/i);
     if (moveMatch) {
-      const what = moveMatch[1].trim();
-      const selector = /^(?:that|this|it)$/i.test(what) ? 'targeted' : what;
+      const selector = cleanSelectorText(moveMatch[1]);
       const at = extractSpatialAt(moveMatch[2]);
       const outcome = await dispatchAgentTool({
         projectName: project.data.name,
@@ -647,9 +901,9 @@ async function runLocalWorldPlanner({ project, runCommand, instruction }) {
       continue;
     }
 
-    // 6. Scale existing object ("make that bigger", "make the barn huge", "shrink it")
-    const scaleMatch = lower.match(/^(?:make|scale|resize)\s+(?:the\s+)?(.+?)\s+(bigger|larger|huge|giant|massive|smaller|tinier|tiny|twice\s+as\s+big|half\s+the\s+size|\d+(?:\.\d+)?x)$/i)
-      ?? lower.match(/^(shrink|enlarge|double)\s+(?:the\s+)?(.+)$/i);
+    // 6. Scale existing object ("make that bigger", "make this windmill smaller", "shrink it")
+    const scaleMatch = lower.match(/^(?:make|scale|resize)\s+(.+?)\s+(bigger|larger|huge|giant|massive|smaller|tinier|tiny|twice\s+as\s+big|half\s+the\s+size|\d+(?:\.\d+)?x)$/i)
+      ?? lower.match(/^(shrink|enlarge|double)\s+(.+)$/i);
     if (scaleMatch) {
       let what;
       let word;
@@ -660,7 +914,7 @@ async function runLocalWorldPlanner({ project, runCommand, instruction }) {
         what = scaleMatch[1].trim();
         word = scaleMatch[2].toLowerCase();
       }
-      const selector = /^(?:that|this|it)$/i.test(what) ? 'targeted' : what;
+      const selector = cleanSelectorText(what);
       let factor = 1.45;
       if (word.endsWith('x')) factor = Number(word.slice(0, -1)) || 1.5;
       else if (word === 'huge' || word === 'giant' || word === 'massive' || word === 'twice as big' || word === 'double') factor = 2.0;
@@ -676,30 +930,13 @@ async function runLocalWorldPlanner({ project, runCommand, instruction }) {
       continue;
     }
 
-    // 7. Rotate existing object ("rotate that 90 degrees", "turn the barn around")
-    const rotateMatch = lower.match(/^(?:rotate|turn|spin)\s+(?:the\s+)?(.+?)(?:\s+(?:by\s+)?(-?\d+)\s*(?:deg(?:rees)?)?|\s+(around))?$/i);
-    if (rotateMatch && (rotateMatch[2] || rotateMatch[3] || /^(?:that|this|it)$/i.test(rotateMatch[1]))) {
-      const what = rotateMatch[1].trim();
-      const selector = /^(?:that|this|it)$/i.test(what) ? 'targeted' : what;
-      const yawDelta = rotateMatch[3] ? 180 : Number(rotateMatch[2] ?? 45);
-      const outcome = await dispatchAgentTool({
-        projectName: project.data.name,
-        runCommand,
-        name: 'modify_object',
-        args: { selector, action: 'rotate', yawDelta },
-      });
-      actions.push({ clause, tool: 'modify_object', ok: outcome.ok, summary: outcome.summary, data: outcome.data, error: outcome.error });
-      continue;
-    }
-
-    // 8. Recolor existing object ("paint that green", "make the barn red", "color it gold")
-    const colorMatch = lower.match(/^(?:paint|recolor|colour|color|make|turn)\s+(?:the\s+)?(.+?)\s+(dark\s+green|forest\s+green|red|crimson|maroon|orange|amber|yellow|gold|golden|green|olive|sage|emerald|teal|cyan|blue|navy|purple|pink|white|cream|beige|tan|brown|rust|grey|gray|silver|charcoal|black|#[0-9a-f]{3,6})$/i);
+    // 7. Recolor existing object ("paint that green", "make the barn red", "color it gold")
+    const colorMatch = lower.match(/^(?:paint|recolor|colour|color|make|turn)\s+(.+?)\s+(dark\s+green|forest\s+green|red|crimson|maroon|orange|amber|yellow|gold|golden|green|olive|sage|emerald|teal|cyan|blue|navy|purple|pink|white|cream|beige|tan|brown|rust|grey|gray|silver|charcoal|black|#[0-9a-f]{3,6})$/i);
     if (colorMatch) {
       const what = colorMatch[1].trim();
       const colorWord = colorMatch[2].trim();
-      // Make sure "make this a hayfield" was already caught above and "what" isn't an article like "a"
       if (!/^(?:this|the\s+world|it\s+a)\b/i.test(what)) {
-        const selector = /^(?:that|this|it)$/i.test(what) ? 'targeted' : what;
+        const selector = cleanSelectorText(what);
         const outcome = await dispatchAgentTool({
           projectName: project.data.name,
           runCommand,
@@ -709,6 +946,56 @@ async function runLocalWorldPlanner({ project, runCommand, instruction }) {
         actions.push({ clause, tool: 'modify_object', ok: outcome.ok, summary: outcome.summary, data: outcome.data, error: outcome.error });
         continue;
       }
+    }
+
+    // 8. Rotate existing object ("rotate this windmill", "turn that fence 90 degrees", "face that barn toward me")
+    const faceMeMatch = lower.match(/^(?:face|point|turn|rotate)\s+(.+?)\s+(?:toward(?:s)?\s+me|to\s+face\s+me)$/i);
+    if (faceMeMatch) {
+      const selector = cleanSelectorText(faceMeMatch[1]);
+      const outcome = await dispatchAgentTool({
+        projectName: project.data.name,
+        runCommand,
+        name: 'modify_object',
+        args: { selector, action: 'rotate', facePlayer: true },
+      });
+      actions.push({ clause, tool: 'modify_object', ok: outcome.ok, summary: outcome.summary, data: outcome.data, error: outcome.error });
+      continue;
+    }
+
+    const rotateMatch = lower.match(
+      /^(?:rotate|turn|spin|twist|face)\s+(.+?)(?:\s+(?:to|by)\s+(-?\d+)\s*(?:deg(?:rees)?|°)?|\s+(?:by\s+)?(-?\d+)\s*(?:deg(?:rees)?|°)|\s+(around|sideways|perpendicular|left|counterclockwise|right|clockwise))?$/i,
+    );
+    if (rotateMatch) {
+      const selector = cleanSelectorText(rotateMatch[1].trim());
+      // "rotate the windmill to 90°" is an absolute yaw; "rotate it 90" (no `to`)
+      // and "turn it around"/"spin it left" are relative turns from the current yaw.
+      const explicitAbsolute = /\bto\s+-?\d+\s*(?:deg(?:rees)?|°)?$/.test(lower);
+      let args;
+      if (rotateMatch[2] !== undefined) {
+        // "rotate it to 90°" = absolute; "rotate it by 90°" = relative
+        args = { action: 'rotate', yawDelta: Number(rotateMatch[2]), mode: explicitAbsolute ? 'absolute' : 'relative' };
+      } else if (rotateMatch[3] !== undefined) {
+        args = { action: 'rotate', yawDelta: Number(rotateMatch[3]), mode: 'relative' };
+      } else if (explicitAbsolute) {
+        args = { action: 'rotate', yawDelta: 45, mode: 'relative' };
+      } else {
+        let yawDelta = 45;
+        const kw = (rotateMatch[4] ?? '').toLowerCase();
+        if (!kw) yawDelta = 45;
+        else if (kw === 'around') yawDelta = 180;
+        else if (kw === 'sideways' || kw === 'perpendicular') yawDelta = 90;
+        else if (kw === 'left' || kw === 'counterclockwise') yawDelta = 45;
+        else if (kw === 'right' || kw === 'clockwise') yawDelta = -45;
+        args = { action: 'rotate', yawDelta, mode: 'relative' };
+      }
+      const outcome = await dispatchAgentTool({
+        projectName: project.data.name,
+        runCommand,
+        name: 'modify_object',
+        args: { selector, ...args },
+      });
+      actions.push({ clause, tool: 'modify_object', ok: outcome.ok, summary: outcome.summary, data: outcome.data, error: outcome.error });
+      continue;
     }
 
     // 9. Scatter multiple objects ("scatter 8 hay bales", "put 5 pine trees around me")

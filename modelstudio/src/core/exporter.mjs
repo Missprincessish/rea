@@ -102,11 +102,17 @@ export function renderPreview(project, objects, { width = 768, height = 768, vie
     const p = item.geometry.positions;
     const t = item.transform?.translation ?? [0, 0, 0];
     const s = item.transform?.scale ?? [1, 1, 1];
+    // Rotation matters: an object turned 90° in VR used to render axis-aligned.
+    const euler = item.transform?.rotation ?? [0, 0, 0];
+    const rot = eulerRotation(euler);
     const out = new Float32Array(p.length);
     for (let i = 0; i < p.length; i += 3) {
-      const x = p[i] * s[0] + t[0];
-      const y = p[i + 1] * s[1] + t[1];
-      const z = p[i + 2] * s[2] + t[2];
+      const sx = p[i] * s[0];
+      const sy = p[i + 1] * s[1];
+      const sz = p[i + 2] * s[2];
+      const x = rot[0] * sx + rot[1] * sy + rot[2] * sz + t[0];
+      const y = rot[3] * sx + rot[4] * sy + rot[5] * sz + t[1];
+      const z = rot[6] * sx + rot[7] * sy + rot[8] * sz + t[2];
       out[i] = x;
       out[i + 1] = y;
       out[i + 2] = z;
@@ -133,7 +139,9 @@ export function renderPreview(project, objects, { width = 768, height = 768, vie
   const floorY = bounds.min[1] - radius * 0.004;
 
   const fov = 0.86;
-  const distance = (radius / Math.tan(fov / 2)) * 1.62;
+  // Frame the bounding sphere with a small margin instead of leaving the model
+  // as a speck in a huge grid (the previous 1.62 factor over-zoomed out).
+  const distance = (radius / Math.tan(fov / 2)) * 1.12;
   const scale = (0.5 * Math.min(width, height)) / Math.tan(fov / 2);
 
   const rotate = (x, y, z) => {
@@ -234,7 +242,7 @@ export function renderPreview(project, objects, { width = 768, height = 768, vie
 
   // ---- floor with grid + shadow ----
   {
-    const ext = radius * 2.8;
+    const ext = radius * 2.1;
     const step = Math.pow(10, Math.round(Math.log10(radius) * 2) / 2) / 2 || 0.1;
     const floorBase = [0.052, 0.07, 0.08];
     const gridCol = [0.1, 0.2, 0.2];
@@ -363,6 +371,19 @@ export function renderPreview(project, objects, { width = 768, height = 768, vie
   const png = encodePng({ width, height, rgba });
   const outPath = target ?? path.join(project.dir, 'previews', `preview-${view}-${Date.now()}.png`);
   return { path: outPath, bytes: 0, trianglesDrawn, png, width, height, generator: 'software-rasteriser' };
+}
+
+/** Euler XYZ rotation (degrees) to a 3x3 row-major matrix. */
+function eulerRotation(euler) {
+  const [rx, ry, rz] = euler.map((d) => (Number(d) || 0) * (Math.PI / 180));
+  const cx = Math.cos(rx), sx = Math.sin(rx);
+  const cy = Math.cos(ry), sy = Math.sin(ry);
+  const cz = Math.cos(rz), sz = Math.sin(rz);
+  return [
+    cy * cz, cy * sz, -sy,
+    sx * sy * cz - cx * sz, sx * sy * sz + cx * cz, sx * cy,
+    cx * sy * cz + sx * sz, cx * sy * sz - sx * cz, cx * cy,
+  ];
 }
 
 function cross(a, b) {

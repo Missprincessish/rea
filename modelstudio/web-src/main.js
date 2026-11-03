@@ -233,15 +233,79 @@ function renderInspector() {
 // generation
 // ---------------------------------------------------------------------------
 
+// Quality presets mirror Meshy's draft / standard / high-detail workflow.
+const QUALITY_PRESETS = {
+  draft: {
+    resolution: 64,
+    note: 'Draft: 64 detail — fastest preview, no post-processing.',
+    post: [],
+  },
+  standard: {
+    resolution: 96,
+    note: 'Standard: 96 detail + auto UV unwrap + baked albedo texture.',
+    post: ['mesh.uv', 'texture.bake'],
+  },
+  ultra: {
+    resolution: 144,
+    note: 'Ultra: 144 detail + repair + UV + bake — game/VR ready, heavier.',
+    post: ['mesh.repair', 'mesh.uv', 'texture.bake'],
+  },
+};
+
+let qualityPreset = 'standard';
+
+function applyQualityPreset(id, { announce = true } = {}) {
+  const preset = QUALITY_PRESETS[id];
+  if (!preset) return;
+  qualityPreset = id;
+  $('#gen-resolution').value = preset.resolution;
+  $('#gen-resolution-out').textContent = preset.resolution;
+  $('#gen-quality-note').textContent = preset.note;
+  document.querySelectorAll('#gen-quality-presets button').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.quality === id);
+  });
+  if (announce) toast(`Quality preset: ${id}`);
+}
+
+/** Everything in the prompt library, filtered by the search box. */
+function renderArchetypeChips(filter = '') {
+  const list = state.capabilities?.archetypes ?? [];
+  $('#archetype-count').textContent = list.length ? `(${list.length})` : '';
+  const needle = filter.trim().toLowerCase();
+  const shown = !needle
+    ? list
+    : list.filter((a) => a.label.toLowerCase().includes(needle)
+      || a.key.toLowerCase().includes(needle)
+      || (a.tags ?? []).some((t) => t.includes(needle)));
+  $('#archetype-chips').innerHTML = shown
+    .map((a) => `<button type="button" data-prompt="${a.label}" title="${a.tags.join(', ')}">${a.label}</button>`)
+    .join('');
+}
+
 async function generateText() {
   const prompt = $('#prompt-input').value.trim();
   if (!prompt) return toast('Type a prompt first', 'err');
   const resolution = Number($('#gen-resolution').value);
   const splitParts = $('#gen-split').checked;
+  const preset = QUALITY_PRESETS[qualityPreset] ?? QUALITY_PRESETS.standard;
   try {
     const result = await run('generate.text', { prompt, resolution, splitParts }, { busy: 'generating geometry' });
     const archetype = result?.data?.result?.archetype;
+    const created = result?.data?.result?.objects?.[0]?.name;
     toast(`Generated ${archetype ?? 'mesh'} · ${result?.data?.result?.objects?.length ?? 0} object(s)`);
+
+    // Post-process the freshly generated mesh according to the quality preset.
+    for (const command of preset.post) {
+      if (!created) break;
+      try {
+        const args = { object: created };
+        if (command === 'texture.bake') Object.assign(args, { size: 512, pattern: 'none', mode: 'albedo' });
+        await run(command, args, { busy: command.split('.').pop(), quiet: true, refresh: false });
+      } catch {
+        /* a preset step must never block the generation itself */
+      }
+    }
+    if (preset.post.length) toast(`Applied ${preset.post.length} finishing step(s) (${qualityPreset})`);
     await sync({ force: true });
     viewport.frameAll();
   } catch {
@@ -589,6 +653,18 @@ function bindEvents() {
   });
 
   $('#btn-generate').addEventListener('click', generateText);
+  $('#gen-quality-presets').addEventListener('click', (event) => {
+    const btn = event.target.closest('button[data-quality]');
+    if (btn) applyQualityPreset(btn.dataset.quality);
+  });
+  $('#archetype-search').addEventListener('input', (event) => renderArchetypeChips(event.target.value));
+  $('#archetype-chips').addEventListener('click', (event) => {
+    const btn = event.target.closest('button[data-prompt]');
+    if (!btn) return;
+    $('#prompt-input').value = btn.dataset.prompt;
+    $('#prompt-input').focus();
+    toast(`Prompt set: ${btn.dataset.prompt} — press Generate mesh`);
+  });
   $('#gen-resolution').addEventListener('input', (e) => { $('#gen-resolution-out').textContent = e.target.value; });
   $('#remesh-resolution').addEventListener('input', (e) => { $('#remesh-resolution-out').textContent = e.target.value; });
   $('#prompt-input').addEventListener('keydown', (event) => {
@@ -868,6 +944,8 @@ async function boot() {
   renderProviders(capabilities);
   $('#workflow-select').innerHTML = (capabilities.workflows ?? []).map((w) => `<option value="${w.id}">${w.label}</option>`).join('');
   $('#mat-preset').innerHTML = '<option value="">custom</option>' + (capabilities.presets ?? []).map((p) => `<option value="${p.id}">${p.id}</option>`).join('');
+  renderArchetypeChips();
+  applyQualityPreset(qualityPreset, { announce: false });
 
   const projects = await refreshProjects();
   const queryProj = new URLSearchParams(location.search).get('project');

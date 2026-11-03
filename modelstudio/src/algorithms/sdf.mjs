@@ -86,21 +86,54 @@ export const sdf = {
     };
   },
 
-  cone: (height = 1, r = 0.4) => ({
-    type: 'cone',
+  /**
+   * Solid capped cone along Y: base radius `r` at -height/2, apex at +height/2.
+   *
+   * (The previous implementation measured distance to a 2D *segment* in the
+   * (radius, y) profile, which produced a zero-thickness hollow shell — lamp
+   * shades and pine trees rendered as slivers.)
+   */
+  cone: (height = 1, r = 0.4) => {
+    const h = height / 2;
+    const r1 = r;
+    const r2 = 0;
+    const k1x = r2;
+    const k1y = h;
+    const k2x = r2 - r1;
+    const k2y = 2 * h;
+    const k2sq = k2x * k2x + k2y * k2y || 1;
+    return {
+      type: 'cone',
+      distance: (x, y, z) => {
+        const qx = Math.hypot(x, z);
+        const qy = y;
+        // ca: distance to the base disc / side clamp region
+        const cax = qx - Math.min(qx, qy < 0 ? r1 : r2);
+        const cay = Math.abs(qy) - h;
+        // cb: distance to the slanted side
+        const t = Math.max(0, Math.min(1, ((k1x - qx) * k2x + (k1y - qy) * k2y) / k2sq));
+        const cbx = qx - k1x + k2x * t;
+        const cby = qy - k1y + k2y * t;
+        const sign = cbx < 0 && cay < 0 ? -1 : 1;
+        return sign * Math.sqrt(Math.min(cax * cax + cay * cay, cbx * cbx + cby * cby));
+      },
+      bounds: () => [-r, -h, -r, r, h, r],
+    };
+  },
+
+  /** Cylinder centred on the origin: radius r, height h along Y. */
+  cylinder: (r = 0.3, h = 0.6, rounding = 0) => ({
+    type: 'cylinder',
+    r,
+    h,
     distance: (x, y, z) => {
-      // cone with tip at +height/2, base at -height/2
-      const q = [Math.hypot(x, z), y];
-      const tip = [0, height / 2];
-      const base = [r, -height / 2];
-      const axis = sub(tip, base);
-      const p = sub(q, base);
-      const t = Math.max(0, Math.min(1, (p[0] * axis[0] + p[1] * axis[1]) / (axis[0] ** 2 + axis[1] ** 2)));
-      const dx = p[0] - axis[0] * t;
-      const dy = p[1] - axis[1] * t;
-      return Math.hypot(dx, dy) - 0.001;
+      const dr = Math.hypot(x, z) - (r - rounding);
+      const dy = Math.abs(y) - (h / 2 - rounding);
+      const outside = Math.hypot(Math.max(dr, 0), Math.max(dy, 0));
+      const inside = Math.min(Math.max(dr, dy), 0);
+      return outside + inside - rounding;
     },
-    bounds: () => [-r, -height / 2, -r, r, height / 2, r],
+    bounds: () => [-r, -h / 2, -r, r, h / 2, r],
   }),
 
   torus: (R = 0.5, r = 0.15) => ({

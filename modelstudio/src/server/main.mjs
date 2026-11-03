@@ -25,6 +25,7 @@ import { openApiDocument } from './openapi.mjs';
 import { listProviders } from '../providers/index.mjs';
 import { listWorkflows } from '../core/workflows.mjs';
 import { listMaterialPresets } from '../core/materials.mjs';
+import { listArchetypes } from '../algorithms/prompt.mjs';
 import { listBiomes, TIME_PRESETS } from '../core/world.mjs';
 import { getAiConfig, openAiToolSchemas, setAiConfig } from '../core/world-agent.mjs';
 import { renderPreview } from '../core/exporter.mjs';
@@ -223,6 +224,7 @@ export function createServer({ root = PROJECTS_ROOT, exportsRoot = EXPORTS_ROOT,
       providers: listProviders(),
       workflows: listWorkflows(),
       presets: listMaterialPresets(),
+      archetypes: listArchetypes(),
       biomes: listBiomes(),
       timePresets: Object.keys(TIME_PRESETS),
       ai: getAiConfig(),

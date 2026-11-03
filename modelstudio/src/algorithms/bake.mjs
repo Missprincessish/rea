@@ -153,7 +153,14 @@ const srgb = (v) => (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(Math.max(0, v
 
 // --- ambient occlusion ------------------------------------------------------
 
-/** Ray-cast ambient occlusion against the mesh itself (BVH-free, sampled). */
+/**
+ * Ray-cast ambient occlusion against the mesh itself.
+ *
+ * Sampled **per texel** during the UV bake (see `bakeAOField`) so a 512² bake
+ * costs ~`covered texels × samples` rays instead of `vertices × samples ×
+ * dilation passes`. A vertex-only variant is still exported for callers that
+ * want vertex colours.
+ */
 export function ambientOcclusion(geo, { samples = 24, maxDistance = 0.4, strength = 1.4, seed = 3 } = {}) {
   const vc = vertexCount(geo);
   const normals = geo.normals.length === vc * 3 ? geo.normals : computeNormals(geo.positions, geo.indices);
@@ -189,6 +196,74 @@ export function ambientOcclusion(geo, { samples = 24, maxDistance = 0.4, strengt
   return ao;
 }
 
+/**
+ * Per-texel AO field: one shared occluder grid + numeric cell keys, sampled
+ * lazily inside `rasterizeUV`.
+ *
+ * Cost is `covered texels × samples` rays; the previous implementation rebuilt a
+ * `Set` per ray and scanned the whole vertex buffer, which took minutes.
+ */
+export function bakeAOField(geo, { samples = 12, maxDistance = 0.35, strength = 1.4, seed = 3, cell = null, perTexel = false } = {}) {
+  const vc = vertexCount(geo);
+  const normals = geo.normals.length === vc * 3 ? geo.normals : computeNormals(geo.positions, geo.indices);
+  const p = geo.positions;
+
+  // Default: occlude at vertices (cheap, smooth) and interpolate across each
+  // triangle in UV space. `perTexel: true` re-shoots the rays per texel for
+  // maximum contact-shadow fidelity at ~10x the cost.
+  if (!perTexel) {
+    const vertex = ambientOcclusion(geo, { samples, maxDistance, strength, seed });
+    return {
+      samples,
+      perTexel: false,
+      sample: ({ ia, ib, ic, w0, w1, w2 }) => vertex[ia] * w0 + vertex[ib] * w1 + vertex[ic] * w2,
+    };
+  }
+
+  const grid = buildTriangleGrid(geo, normals, cell);
+  const random = mulberry(seed);
+
+  return {
+    samples,
+    perTexel: true,
+    /**
+     * AO for one texel, interpolated across its triangle.
+     * `w0/w1/w2` are the rasteriser's barycentric weights for ia/ib/ic.
+     */
+    sample: ({ ia, ib, ic, w0, w1, w2 }) => {
+      const u = w0;
+      const v = w1;
+      const w = 1 - u - v;
+      const px = p[ia * 3] * u + p[ib * 3] * v + p[ic * 3] * w;
+      const py = p[ia * 3 + 1] * u + p[ib * 3 + 1] * v + p[ic * 3 + 1] * w;
+      const pz = p[ia * 3 + 2] * u + p[ib * 3 + 2] * v + p[ic * 3 + 2] * w;
+      let nx = normals[ia * 3] * u + normals[ib * 3] * v + normals[ic * 3] * w;
+      let ny = normals[ia * 3 + 1] * u + normals[ib * 3 + 1] * v + normals[ic * 3 + 1] * w;
+      let nz = normals[ia * 3 + 2] * u + normals[ib * 3 + 2] * v + normals[ic * 3 + 2] * w;
+      const nl = Math.hypot(nx, ny, nz) || 1;
+      nx /= nl; ny /= nl; nz /= nl;
+      const [t0, t1] = tangentFrame(nx, ny, nz);
+      let occluded = 0;
+      for (let s = 0; s < samples; s += 1) {
+        const r1 = random();
+        const r2 = random();
+        const theta = Math.acos(Math.sqrt(1 - r1 * 0.995));
+        const phi = 2 * Math.PI * r2;
+        const dx = Math.cos(phi) * Math.sin(theta);
+        const dy = Math.sin(phi) * Math.sin(theta);
+        const dz = Math.cos(theta);
+        const dirX = t0[0] * dx + t1[0] * dy + nx * dz;
+        const dirY = t0[1] * dx + t1[1] * dy + ny * dz;
+        const dirZ = t0[2] * dx + t1[2] * dy + nz * dz;
+        if (anyHit(grid, px + nx * 1e-3, py + ny * 1e-3, pz + nz * 1e-3, dirX, dirY, dirZ, maxDistance)) {
+          occluded += 1 - dz * 0.5;
+        }
+      }
+      return Math.max(0.12, Math.min(1, 1 - (occluded / samples) * strength));
+    },
+  };
+}
+
 function tangentFrame(nx, ny, nz) {
   const helper = Math.abs(ny) < 0.9 ? [0, 1, 0] : [1, 0, 0];
   let tx = helper[1] * nz - helper[2] * ny;
@@ -204,70 +279,93 @@ function tangentFrame(nx, ny, nz) {
   return [[tx, ty, tz], [bx, by, bz]];
 }
 
-function buildTriangleGrid(geo, normals) {
-  const cell = 0.08;
-  const cells = new Map();
+/**
+ * Uniform-grid ray accelerator, built ONCE per mesh. Cells are keyed by packed
+ * integers (no string concatenation in the hot loop).
+ */
+function buildTriangleGrid(geo, normals, cellSize = null) {
   const p = geo.positions;
-  const vn = (i) => [normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]];
-  const tris = [];
-  for (let i = 0; i < geo.indices.length; i += 3) {
-    const ia = geo.indices[i], ib = geo.indices[i + 1], ic = geo.indices[i + 2];
-    const a = [p[ia * 3], p[ia * 3 + 1], p[ia * 3 + 2]];
-    const b = [p[ib * 3], p[ib * 3 + 1], p[ib * 3 + 2]];
-    const c = [p[ic * 3], p[ic * 3 + 1], p[ic * 3 + 2]];
-    const na = vn(ia), nb = vn(ib), nc = vn(ic);
-    const tri = { a, b, c, na, nb, nc, min: [0, 0, 0], max: [0, 0, 0] };
-    for (let k = 0; k < 3; k += 1) {
-      tri.min[k] = Math.min(a[k], b[k], c[k]) - cell;
-      tri.max[k] = Math.max(a[k], b[k], c[k]) + cell;
-    }
-    const index = tris.push(tri) - 1;
-    for (let x = Math.floor(tri.min[0] / cell); x <= Math.floor(tri.max[0] / cell); x += 1) {
-      for (let y = Math.floor(tri.min[1] / cell); y <= Math.floor(tri.max[1] / cell); y += 1) {
-        for (let z = Math.floor(tri.min[2] / cell); z <= Math.floor(tri.max[2] / cell); z += 1) {
-          const key = `${x},${y},${z}`;
-          if (!cells.has(key)) cells.set(key, []);
-          cells.get(key).push(index);
+  const triCount = Math.floor(geo.indices.length / 3);
+  // Cell size: aim for a handful of triangles per cell regardless of mesh scale.
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < p.length; i += 3) {
+    if (p[i] < minX) minX = p[i];
+    if (p[i] > maxX) maxX = p[i];
+    if (p[i + 1] < minY) minY = p[i + 1];
+    if (p[i + 1] > maxY) maxY = p[i + 1];
+    if (p[i + 2] < minZ) minZ = p[i + 2];
+    if (p[i + 2] > maxZ) maxZ = p[i + 2];
+  }
+  const extent = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || 1;
+  const cell = cellSize ?? Math.max(extent / 64, extent / Math.cbrt(Math.max(1, triCount)) * 1.5, 0.01);
+
+  const cells = new Map();
+  const tris = new Float64Array(triCount * 9);
+  const cellOf = (v) => Math.floor(v / cell);
+  const keyOf = (x, y, z) => ((x + 512) * 1024 + (y + 512)) * 1024 + (z + 512);
+
+  for (let i = 0; i < triCount; i += 1) {
+    const ia = geo.indices[i * 3];
+    const ib = geo.indices[i * 3 + 1];
+    const ic = geo.indices[i * 3 + 2];
+    const o = i * 9;
+    tris[o] = p[ia * 3]; tris[o + 1] = p[ia * 3 + 1]; tris[o + 2] = p[ia * 3 + 2];
+    tris[o + 3] = p[ib * 3]; tris[o + 4] = p[ib * 3 + 1]; tris[o + 5] = p[ib * 3 + 2];
+    tris[o + 6] = p[ic * 3]; tris[o + 7] = p[ic * 3 + 1]; tris[o + 8] = p[ic * 3 + 2];
+    const ax = tris[o], ay = tris[o + 1], az = tris[o + 2];
+    const bx = tris[o + 3], by = tris[o + 4], bz = tris[o + 5];
+    const cx = tris[o + 6], cy = tris[o + 7], cz = tris[o + 8];
+    const x0 = cellOf(Math.min(ax, bx, cx)), x1 = cellOf(Math.max(ax, bx, cx));
+    const y0 = cellOf(Math.min(ay, by, cy)), y1 = cellOf(Math.max(ay, by, cy));
+    const z0 = cellOf(Math.min(az, bz, cz)), z1 = cellOf(Math.max(az, bz, cz));
+    for (let x = x0; x <= x1; x += 1) {
+      for (let y = y0; y <= y1; y += 1) {
+        for (let z = z0; z <= z1; z += 1) {
+          const key = keyOf(x, y, z);
+          const bucket = cells.get(key);
+          if (bucket) bucket.push(i);
+          else cells.set(key, [i]);
         }
       }
     }
   }
-  return { cells, tris, cell };
+  void normals;
+  return { cells, tris, cell, keyOf };
 }
 
 function anyHit(grid, ox, oy, oz, dx, dy, dz, maxDistance) {
   const { cells, tris, cell } = grid;
-  const visited = new Set();
-  let t = 0.002;
-  while (t < maxDistance) {
+  const step = cell * 0.6;
+  let lastX = NaN, lastY = NaN, lastZ = NaN;
+  let list = null;
+  for (let t = 0.002; t < maxDistance; t += step) {
     const x = Math.floor((ox + dx * t) / cell);
     const y = Math.floor((oy + dy * t) / cell);
     const z = Math.floor((oz + dz * t) / cell);
-    const key = `${x},${y},${z}`;
-    if (!visited.has(key)) {
-      visited.add(key);
-      const list = cells.get(key);
-      if (list) {
-        for (const index of list) {
-          if (rayTriangle(ox, oy, oz, dx, dy, dz, tris[index])) return true;
-        }
+    if (x !== lastX || y !== lastY || z !== lastZ) {
+      lastX = x; lastY = y; lastZ = z;
+      list = cells.get(grid.keyOf(x, y, z));
+    }
+    if (list) {
+      for (let i = 0; i < list.length; i += 1) {
+        if (rayTriangleFlat(tris, list[i] * 9, ox, oy, oz, dx, dy, dz)) return true;
       }
     }
-    t += cell * 0.7;
   }
   return false;
 }
 
-function rayTriangle(ox, oy, oz, dx, dy, dz, tri) {
-  const e1x = tri.b[0] - tri.a[0], e1y = tri.b[1] - tri.a[1], e1z = tri.b[2] - tri.a[2];
-  const e2x = tri.c[0] - tri.a[0], e2y = tri.c[1] - tri.a[1], e2z = tri.c[2] - tri.a[2];
+function rayTriangleFlat(t, o, ox, oy, oz, dx, dy, dz) {
+  const e1x = t[o + 3] - t[o], e1y = t[o + 4] - t[o + 1], e1z = t[o + 5] - t[o + 2];
+  const e2x = t[o + 6] - t[o], e2y = t[o + 7] - t[o + 1], e2z = t[o + 8] - t[o + 2];
   const px = dy * e2z - dz * e2y;
   const py = dz * e2x - dx * e2z;
   const pz = dx * e2y - dy * e2x;
   const det = e1x * px + e1y * py + e1z * pz;
-  if (Math.abs(det) < 1e-9) return false;
+  if (det > -1e-9 && det < 1e-9) return false;
   const inv = 1 / det;
-  const tx = ox - tri.a[0], ty = oy - tri.a[1], tz = oz - tri.a[2];
+  const tx = ox - t[o], ty = oy - t[o + 1], tz = oz - t[o + 2];
   const u = (tx * px + ty * py + tz * pz) * inv;
   if (u < 0 || u > 1) return false;
   const qx = ty * e1z - tz * e1y;
@@ -299,14 +397,15 @@ export function bakeBaseColor(geo, {
   size = 1024,
   baseColor = [0.8, 0.8, 0.8],
   ao = null,
+  aoField = null,
   pattern = 'none',
   painted = null,
   roughnessHighlights = 0.15,
 } = {}) {
-  const aoValues = ao ?? ambientOcclusion(geo);
-  const vc = vertexCount(geo);
-  const raster = rasterizeUV(geo, size, ({ w0, w1, w2, ia, ib, ic, u, v }) => {
-    const a = aoValues[ia] * w0 + aoValues[ib] * w1 + aoValues[ic] * w2;
+  const field = aoField ?? (ao ? null : bakeAOField(geo));
+  const raster = rasterizeUV(geo, size, ({ w0, w1, w2, ia, ib, ic, triangle, u, v }) => {
+    const a = field ? field.sample({ ia, ib, ic, triangle, w0, w1, w2 })
+      : ao[ia] * w0 + ao[ib] * w1 + ao[ic] * w2;
     let tint = [1, 1, 1];
     let value = 1;
     if (pattern !== 'none') {
@@ -328,14 +427,17 @@ export function bakeBaseColor(geo, {
     }
     return { color, alpha: 1 };
   });
-  return { ...raster, png: encodePng({ width: size, height: size, rgba: toRgba(raster) }), aoValues };
+  return { ...raster, png: encodePng({ width: size, height: size, rgba: toRgba(raster) }) };
 }
 
 /** Bake an AO map (grayscale in RGB). */
-export function bakeAO(geo, { size = 1024, ao = null, strength = 1 } = {}) {
-  const aoValues = ao ?? ambientOcclusion(geo);
-  const raster = rasterizeUV(geo, size, ({ w0, w1, w2, ia, ib, ic }) => {
-    const a = (aoValues[ia] * w0 + aoValues[ib] * w1 + aoValues[ic] * w2) ** strength;
+export function bakeAO(geo, { size = 1024, ao = null, aoField = null, strength = 1 } = {}) {
+  const field = aoField ?? (ao ? null : bakeAOField(geo));
+  const raster = rasterizeUV(geo, size, ({ w0, w1, w2, ia, ib, ic, triangle }) => {
+    const raw = field
+      ? field.sample({ ia, ib, ic, triangle, w0, w1, w2 })
+      : ao[ia] * w0 + ao[ib] * w1 + ao[ic] * w2;
+    const a = Math.max(0, Math.min(1, raw)) ** strength;
     return { color: [a, a, a], alpha: 1 };
   });
   return { ...raster, png: encodePng({ width: size, height: size, rgba: toRgba(raster) }) };
