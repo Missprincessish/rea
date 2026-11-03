@@ -125,3 +125,41 @@ test('sceneFromPrompt keeps parts for split generation', () => {
   assert.ok(scene);
   assert.ok(scene.geometry || scene.parts || scene.shape, 'scene must expose geometry or parts');
 });
+
+
+// ---------------------------------------------------------------------------
+// Studio editor wiring (the Meshy-style desktop surface must not regress)
+// ---------------------------------------------------------------------------
+
+test('studio editor exposes quality presets and the prompt library', async () => {
+  const root = path.resolve(import.meta.dirname, '..');
+  const [html, main] = await Promise.all([
+    fs.readFile(path.join(root, 'web-src/index.html'), 'utf8'),
+    fs.readFile(path.join(root, 'web-src/main.js'), 'utf8'),
+  ]);
+  for (const id of ['gen-quality-presets', 'archetype-chips', 'archetype-search', 'archetype-count', 'btn-generate', 'image-dropzone', 'btn-generate-image']) {
+    assert.ok(html.includes(`id="${id}"`), `index.html is missing #${id}`);
+  }
+  for (const preset of ['draft', 'standard', 'ultra']) {
+    assert.ok(html.includes(`data-quality="${preset}"`), `missing quality preset: ${preset}`);
+  }
+  assert.ok(main.includes('QUALITY_PRESETS'), 'main.js must define the quality presets');
+  assert.ok(main.includes('renderArchetypeChips'), 'main.js must render the prompt library');
+  assert.ok(main.includes("run('generate.text'"), 'main.js must call generate.text');
+  assert.ok(main.includes("run('generate.image'"), 'main.js must call generate.image (image-to-3D)');
+});
+
+test('/api/capabilities exposes the archetype library for the editor', async () => {
+  const { startServer } = await import('../src/server/main.mjs');
+  const { server, port } = await startServer({ port: 0, host: '127.0.0.1', root: home });
+  try {
+    const payload = await fetch(`http://127.0.0.1:${port}/api/capabilities`).then((r) => r.json());
+    assert.ok(Array.isArray(payload.archetypes));
+    assert.ok(payload.archetypes.length >= 45, `only ${payload.archetypes?.length} archetypes exposed`);
+    assert.ok(payload.archetypes.every((a) => a.key && a.label));
+    assert.ok(payload.commands.length >= 60);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
