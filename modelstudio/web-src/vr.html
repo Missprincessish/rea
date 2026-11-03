@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>ModelStudio VR World — Live Spatial AI &amp; Open MCP</title>
+    <link rel="stylesheet" href="./vr.css" />
+  </head>
+  <body>
+    <div id="vr-stage"></div>
+
+    <!-- Top status & navigation bar -->
+    <header class="vr-topbar">
+      <div class="vr-brand">
+        <a href="/" class="vr-back" id="link-studio" title="Back to Studio Modeling View">&larr; Studio</a>
+        <span class="vr-dot"></span>
+        <strong>MODEL<span>STUDIO</span> VR</strong>
+        <select id="vr-project-select" title="Active world project"></select>
+        <span class="vr-badge" id="vr-biome-badge">studio</span>
+      </div>
+
+      <div class="vr-top-actions">
+        <span class="vr-coord-pill" id="vr-pointer-pill" title="Click anywhere in the 3D world (or pull VR trigger) to pin 'Right There'">
+          📍 Right There: <code id="vr-coord-text">0.0, 0.0, -2.5</code>
+        </span>
+        <span class="vr-target-pill hidden" id="vr-target-pill">
+          🎯 Target: <code id="vr-target-text">none</code>
+        </span>
+        <button class="vr-btn" id="btn-ai-drawer" title="Configure ChatGPT / OpenAI / Local LLM &amp; Open MCP">AI &amp; MCP</button>
+        <button class="vr-btn vr-enter" id="btn-enter-vr">Enter VR (Quest / WebXR)</button>
+        <button class="vr-btn vr-ar hidden" id="btn-enter-ar" title="Meta Quest 3S Color Passthrough">Passthrough AR</button>
+      </div>
+    </header>
+
+    <!-- Secure-context / Quest Wi-Fi helper banner (shown only if HTTP over non-localhost LAN) -->
+    <div class="vr-banner hidden" id="vr-https-warning">
+      <strong>Meta Quest Wi-Fi note:</strong> WebXR &amp; voice mic require HTTPS on LAN IPs. Run
+      <code>npm run start:vr</code> (or <code>modelstudio serve --https</code>) on your MacBook and open the
+      <code>https://</code> port on your Quest 3S.
+    </div>
+
+    <!-- Quick spatial chips -->
+    <div class="vr-quick-chips" id="vr-quick-chips">
+      <button data-say="make this a hayfield and put a green barn right there">🌾 Hayfield + Green Barn Here</button>
+      <button data-say="make this a pine forest at sunset">🌲 Sunset Forest</button>
+      <button data-say="make this a snowfield">❄️ Snowfield</button>
+      <button data-say="make this a starlit clearing with fireflies">✨ Night Fireflies</button>
+      <button data-say="put a windmill right there">🗼 Windmill Here</button>
+      <button data-say="put a wooden fence right there">🪵 Fence Here</button>
+      <button data-say="scatter 6 hay bales around me">🌾 Scatter Hay Bales</button>
+      <button data-say="undo">↩️ Undo</button>
+    </div>
+
+    <!-- AI Reply / Transcript toast -->
+    <div class="vr-reply hidden" id="vr-reply-box">
+      <div class="vr-reply-label" id="vr-reply-mode">AI World Builder</div>
+      <div class="vr-reply-text" id="vr-reply-text"></div>
+    </div>
+
+    <!-- Bottom Spatial Voice + Text Command Bar -->
+    <form class="vr-command-bar" id="vr-command-form" autocomplete="off">
+      <button type="button" class="vr-mic-btn" id="btn-voice" title="Speak command while pointing (locks current pointer spot)">
+        <span class="mic-icon">🎤</span>
+        <span id="voice-label">Speak</span>
+      </button>
+      <input
+        type="text"
+        id="vr-prompt-input"
+        placeholder='Point anywhere (click to pin) and say or type: "chatgpt make this a hayfield and put a green barn right there"'
+      />
+      <button type="submit" class="vr-send-btn" id="btn-send-prompt">Build</button>
+    </form>
+
+    <!-- Controls legend -->
+    <div class="vr-help-hint">
+      <span><strong>Desktop:</strong> Click ground/object = pin "right there" &middot; Drag = look &middot; WASD = walk</span>
+      <span><strong>Quest 3S:</strong> Trigger = pin "right there" &middot; A/X = voice &middot; B/Y = VR menu &middot; Sticks = walk / turn / teleport</span>
+    </div>
+
+    <!-- Open MCP & AI Provider Drawer -->
+    <aside class="vr-drawer hidden" id="ai-drawer">
+      <div class="vr-drawer-head">
+        <h2>AI Provider &amp; Open MCP</h2>
+        <button class="vr-close" id="btn-close-drawer">&times;</button>
+      </div>
+
+      <p class="vr-drawer-note">
+        ModelStudio is open to <strong>any AI</strong>. Use the built-in offline spatial planner, connect ChatGPT / Ollama / OpenRouter, or attach any MCP client live while you are in VR.
+      </p>
+
+      <label class="vr-field">
+        <span>In-World Voice/Text Engine</span>
+        <select id="ai-provider-select">
+          <option value="auto">Auto (OpenAI-compatible if configured, else Offline Spatial Planner)</option>
+          <option value="local">Built-in Offline Spatial Planner (no key needed)</option>
+          <option value="openai">OpenAI-compatible LLM (ChatGPT, Ollama, LM Studio, OpenRouter…)</option>
+        </select>
+      </label>
+
+      <label class="vr-field">
+        <span>Base URL (OpenAI-compatible)</span>
+        <input type="text" id="ai-base-url" placeholder="https://api.openai.com/v1 or http://localhost:11434/v1" />
+      </label>
+
+      <label class="vr-field">
+        <span>Model</span>
+        <input type="text" id="ai-model" placeholder="gpt-4o-mini / gpt-4.1 / llama3.2" />
+      </label>
+
+      <label class="vr-field">
+        <span>API Key (held in server memory only, optional for Ollama)</span>
+        <input type="password" id="ai-api-key" placeholder="sk-..." />
+      </label>
+
+      <div class="vr-row">
+        <button type="button" class="vr-btn vr-enter" id="btn-save-ai">Save AI Settings</button>
+        <label class="vr-check"><input type="checkbox" id="chk-tts" checked /> Speak AI replies aloud</label>
+      </div>
+
+      <hr />
+      <h3>Open MCP Endpoints (Claude, ChatGPT, Cursor, Custom Agents)</h3>
+      <label class="vr-field">
+        <span>Streamable HTTP MCP URL</span>
+        <input type="text" id="mcp-http-url" readonly />
+      </label>
+      <label class="vr-field">
+        <span>Stdio MCP Config (<code>mcp.json</code>)</span>
+        <textarea id="mcp-stdio-json" rows="6" readonly></textarea>
+      </label>
+      <label class="vr-field">
+        <span>Meta Quest 3S LAN Addresses</span>
+        <input type="text" id="quest-lan-urls" readonly />
+      </label>
+    </aside>
+
+    <script type="module" src="./vr-main.js"></script>
+  </body>
+</html>
